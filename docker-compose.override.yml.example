@@ -1,0 +1,14 @@
+# Sprint 0 Review finding #26 / Remediation #26 — example per-developer local
+# overrides. Copy to `docker-compose.override.yml` (gitignored) and edit;
+# docker compose merges it automatically, no flag needed.
+
+services:
+  api:
+    ports:
+      - "8001:8000"  # avoid clashing with another local service on 8000
+    environment:
+      LOG_LEVEL: DEBUG
+
+  postgres:
+    ports:
+      - "5433:5432"  # avoid clashing with a locally-installed Postgres

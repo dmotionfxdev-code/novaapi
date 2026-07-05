@@ -1,0 +1,36 @@
+# Sprint 0 Review finding #23 / Remediation #23 — mirrors .gitignore so the
+# Docker build context never carries secrets, VCS history, or unrelated
+# content regardless of how COPY instructions evolve later.
+
+.git/
+.github/
+
+.env
+*.env.local
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.venv/
+venv/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+docs/
+tests/
+scripts/
+CONTRIBUTING.md
+# README.md is intentionally NOT excluded — pyproject.toml's [project.readme]
+# points at it, and setuptools reads it during `pip install .` at build time.
+
+docker-compose*.yml
+docker-compose.override.yml.example

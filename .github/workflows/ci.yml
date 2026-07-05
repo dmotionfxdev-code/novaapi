@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: mypy src/
+
+  # Sprint 0 Review finding #6 / Remediation #6: this job is the literal
+  # proof that the corrected `independence` contract (pyproject.toml)
+  # actually enforces context isolation, not just that it exists.
+  import-boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: lint-imports
+
+  # Sprint 0 Review finding #3 / Remediation #3 (Critical): fails the build
+  # if the committed lock is out of sync with pyproject.toml, so "reproduce
+  # this build" is always actually true, not just documented as a goal.
+  lockfile-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pip-tools
+      - run: pip-compile --output-file=/tmp/requirements.lock pyproject.toml
+      - run: pip-compile --extra=dev --output-file=/tmp/requirements-dev.lock pyproject.toml
+      - name: Fail if committed lockfiles are stale
+        run: |
+          diff requirements.lock /tmp/requirements.lock
+          diff requirements-dev.lock /tmp/requirements-dev.lock
+
+  test:
+    runs-on: ubuntu-latest
+    needs: [lockfile-check]
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: georisk_test
+          POSTGRES_USER: georisk
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U georisk" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.lock
+      - run: pip install -e . --no-deps
+      - run: pytest --cov=src/georisk --cov-report=term-missing --cov-report=xml
+        env:
+          DATABASE_URL: postgresql+asyncpg://georisk:test@localhost:5432/georisk_test
+          REDIS_URL: redis://localhost:6379/0
+
+  migration-check:
+    runs-on: ubuntu-latest
+    needs: [lockfile-check]
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: georisk_migrate
+          POSTGRES_USER: georisk
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U georisk" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.lock
+      - run: pip install -e . --no-deps
+      - name: Confirm single-head migration history
+        run: test "$(alembic heads | wc -l)" -eq 1
+        env:
+          DATABASE_URL: postgresql+asyncpg://georisk:test@localhost:5432/georisk_migrate
+      - run: alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://georisk:test@localhost:5432/georisk_migrate
+      - run: alembic downgrade base
+        env:
+          DATABASE_URL: postgresql+asyncpg://georisk:test@localhost:5432/georisk_migrate
+
+  # Sprint 0 Review finding #10 / Remediation #10: catches a known-CVE
+  # dependency at Sprint 0, not at Roadmap Sprint 12's dedicated security
+  # review pass, twelve sprints later.
+  dependency-scan:
+    runs-on: ubuntu-latest
+    needs: [lockfile-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.lock --strict
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, import-boundaries, test, migration-check]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build api image
+        run: docker build -f docker/api/Dockerfile -t georisk-api:ci .
+      - name: Build worker image
+        run: docker build -f docker/worker/Dockerfile -t georisk-worker:ci .
+      - name: Confirm containers do not run as root
+        # Both images set an ENTRYPOINT (api.sh / worker.sh) — without
+        # `--entrypoint id` here, `id -u` would be passed as *arguments* to
+        # that entrypoint script rather than replacing it.
+        run: |
+          test "$(docker run --rm --entrypoint id georisk-api:ci -u)" != "0"
+          test "$(docker run --rm --entrypoint id georisk-worker:ci -u)" != "0"
+      # Sprint 0 Review finding #10 / Remediation #10 — image scan.
+      - name: Scan images for known-exploitable vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: georisk-api:ci
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+      # Image is built and scanned here only — pushing to a registry and
+      # promoting to staging/production is deliberately out of scope for
+      # Sprint 0 (Roadmap Sprint 12's job, Infrastructure Architecture §25;
+      # Sprint 0 Review finding #32, tracked intentionally, not omitted).

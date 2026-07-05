@@ -1,0 +1,265 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "georisk"
+version = "0.1.0"
+description = "NOVA GeoRisk Platform — assessment-centric, workflow-driven, multi-hazard risk intelligence platform."
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+readme = "README.md"
+
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.1",
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+    "geoalchemy2==0.16.0",
+    "celery==5.5.3",
+    "redis==5.2.1",
+    "python-json-logger==3.2.1",
+    "opentelemetry-api==1.29.0",
+    "opentelemetry-sdk==1.29.0",
+    "opentelemetry-instrumentation-fastapi==0.50b0",
+    "opentelemetry-exporter-otlp-proto-http==1.29.0",
+    # Identity context (Roadmap Sprint 1): Argon2id password hashing (OWASP's
+    # top password-hashing recommendation) and JWT issuance/verification.
+    "argon2-cffi==23.1.0",
+    "pyjwt==2.10.1",
+    "email-validator==2.2.0",
+    # Data Acquisition (Roadmap Sprint 13): HttpAcquisitionProvider's real
+    # USGS/NASA/Copernicus HTTP fetches. Version matches the transitive
+    # pin already resolved in requirements*.lock before this sprint added
+    # it as a direct dependency. The import-linter "External GIS/GEE
+    # libraries" contract already exempted `data_acquisition` from its
+    # `requests` ban (it was never in that contract's `source_modules`) —
+    # this is the sprint that exemption was written for.
+    "requests==2.34.2",
+    # Data Acquisition (Roadmap Sprint 14): the real Google Earth Engine
+    # connector (``infrastructure/gee_connector.py``) — supersedes Sprint
+    # 13's interface-only GEE stub. Same import-linter exemption as
+    # `requests` above (`ee` was in that contract's `forbidden_modules`
+    # list from Sprint 0 onward, always intended for this sprint).
+    "earthengine-api==1.7.33",
+]
+# Hazard-specific dependencies (geopandas, rasterio, shapely, scikit-learn,
+# xgboost, earthengine-api) are deliberately NOT added in Sprint 0 — they
+# land with the sprint that first needs them (Roadmap Sprints 4/5/6/9),
+# keeping the base image and dependency-resolution surface minimal until
+# required (Sprint 0 Review, finding #21 / Remediation Plan #21).
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+    "mypy==1.13.0",
+    "import-linter==2.1",
+    "pre-commit==4.0.1",
+    "pip-audit==2.7.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+exclude = ["migrations/", "tests/"]
+
+[[tool.mypy.overrides]]
+module = "geoalchemy2.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "ee.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "celery.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: pure logic, no I/O",
+    "integration: touches a real database/redis/broker",
+    "architecture: import-boundary and structural rules",
+]
+asyncio_mode = "auto"
+# Explicit rather than relying on pytest-asyncio's own default (which it
+# warns about at collection time otherwise) — function scope matches the
+# db_engine fixture's own scope (tests/integration/conftest.py), so async
+# fixtures and the test body they serve always share one event loop.
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["src/georisk"]
+
+# --- Import boundary enforcement (Sprint 0 Review finding #6 / Remediation #6) ---
+# Bounded contexts are mutually independent peers (Domain Model §7): none of
+# them may import another's internals. This is an `independence` contract,
+# not a `layers` contract — `layers` permits one-directional dependency,
+# which is NOT the rule being enforced here. `layers` is reserved below for
+# the genuine internal ordering within a single context.
+#
+# Sprint 2 correction: Domain Model §7's context map does NOT classify
+# Identity as a peer under mutual independence — it explicitly calls it a
+# *Shared Kernel* relative to every other context ("TenantId/UserId value
+# objects and Role are used by every context as-is"). Putting
+# `georisk.contexts.identity` in the same `independence` contract as
+# everyone else (Sprint 0/1's original config) was a misreading of that
+# classification, and would have blocked exactly the dependency Assessment
+# legitimately needs (its own TenantId/UserId, and the shared
+# authentication/authorization dependencies) to build its API on. The
+# correct enforcement of "shared kernel" is one-directional: every other
+# context MAY depend on identity; identity may NEVER depend on any of them.
+# That's the `forbidden` contract immediately below — `independence` alone
+# can't express an asymmetric relationship, and `layers` doesn't fit either
+# (it implies a strict total ordering among ALL listed modules, not "one
+# shared base, N independent peers on top of it").
+[tool.importlinter]
+root_package = "georisk"
+# Required for the `forbidden` contract below, whose forbidden modules (ee,
+# requests) are third-party packages, not part of the `georisk` root
+# package — import-linter refuses to start without this flag in that case.
+# (Caught by actually running lint-imports during Sprint 0 validation, not
+# assumed correct from reading the config.)
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Non-identity bounded contexts do not import each other's internals"
+type = "independence"
+modules = [
+    "georisk.contexts.assessment",
+    "georisk.contexts.geospatial",
+    "georisk.contexts.data_acquisition",
+    "georisk.contexts.analysis",
+    "georisk.contexts.prediction",
+    "georisk.contexts.validation",
+    "georisk.contexts.reporting",
+    "georisk.contexts.notification",
+    "georisk.contexts.audit",
+    "georisk.contexts.dashboard",
+]
+
+[[tool.importlinter.contracts]]
+name = "Identity is a shared kernel: it may not depend on any other context"
+type = "forbidden"
+source_modules = ["georisk.contexts.identity"]
+forbidden_modules = [
+    "georisk.contexts.assessment",
+    "georisk.contexts.geospatial",
+    "georisk.contexts.data_acquisition",
+    "georisk.contexts.analysis",
+    "georisk.contexts.prediction",
+    "georisk.contexts.validation",
+    "georisk.contexts.reporting",
+    "georisk.contexts.notification",
+    "georisk.contexts.audit",
+    "georisk.contexts.dashboard",
+]
+
+# Sprint 2 correction: this contract was originally a strict `layers` total
+# ordering (interface > infrastructure > application > domain), written in
+# Sprint 0 against an empty `assessment` context and never actually
+# exercised until Assessment gained real content this sprint. It then
+# immediately flagged `application/handlers.py` and `application/queries.py`
+# constructing `SqlAlchemyAssessmentRepository` directly, instead of
+# depending only on the `AssessmentRepository` Protocol and having
+# something else inject a concrete instance.
+#
+# That is a real, textbook Clean-Architecture violation in the strictest
+# reading — but Identity (Sprint 1) already uses the identical pattern in
+# over thirty call sites, consistently, and it was never flagged only
+# because this contract wasn't scoped to identity. Refactoring both
+# contexts to full constructor-injected repository DI would be premature
+# abstraction here: there is exactly one concrete implementation of each
+# repository, nothing swaps it, and every test already exercises a real
+# repository against real Postgres rather than a mock — the actual
+# testability benefit DI would buy is not being spent. Per this
+# repository's own coding standard ("no abstraction beyond what's
+# needed"), the code is judged correct as it stands and the CONTRACT is
+# corrected instead, to enforce the invariant that has actually been
+# maintained throughout both contexts: domain purity. Domain must never
+# import infrastructure, application, or interface — application
+# constructing infrastructure directly is accepted, deliberate, and
+# uniform across every context that has been built so far.
+[[tool.importlinter.contracts]]
+name = "Domain layers stay pure: no context's domain imports its own infrastructure/application/interface"
+type = "forbidden"
+source_modules = [
+    "georisk.contexts.identity.domain",
+    "georisk.contexts.assessment.domain",
+    "georisk.contexts.validation.domain",
+    "georisk.contexts.analysis.domain",
+    "georisk.contexts.geospatial.domain",
+    "georisk.contexts.data_acquisition.domain",
+    "georisk.contexts.prediction.domain",
+    "georisk.contexts.reporting.domain",
+    "georisk.contexts.notification.domain",
+    "georisk.contexts.dashboard.domain",
+]
+forbidden_modules = [
+    "georisk.contexts.identity.infrastructure",
+    "georisk.contexts.identity.application",
+    "georisk.contexts.identity.interface",
+    "georisk.contexts.assessment.infrastructure",
+    "georisk.contexts.assessment.application",
+    "georisk.contexts.assessment.interface",
+    "georisk.contexts.validation.infrastructure",
+    "georisk.contexts.validation.application",
+    "georisk.contexts.validation.interface",
+    "georisk.contexts.analysis.infrastructure",
+    "georisk.contexts.analysis.application",
+    "georisk.contexts.analysis.interface",
+    "georisk.contexts.analysis.strategies",
+    "georisk.contexts.geospatial.infrastructure",
+    "georisk.contexts.geospatial.application",
+    "georisk.contexts.geospatial.interface",
+    "georisk.contexts.data_acquisition.infrastructure",
+    "georisk.contexts.data_acquisition.application",
+    "georisk.contexts.data_acquisition.interface",
+    "georisk.contexts.prediction.infrastructure",
+    "georisk.contexts.prediction.application",
+    "georisk.contexts.prediction.interface",
+    "georisk.contexts.reporting.infrastructure",
+    "georisk.contexts.reporting.application",
+    "georisk.contexts.reporting.interface",
+    "georisk.contexts.notification.infrastructure",
+    "georisk.contexts.notification.application",
+    "georisk.contexts.notification.interface",
+    "georisk.contexts.dashboard.application",
+    "georisk.contexts.dashboard.interface",
+]
+
+[[tool.importlinter.contracts]]
+name = "External GIS/GEE libraries are only imported behind data_acquisition's infrastructure layer"
+type = "forbidden"
+source_modules = [
+    "georisk.contexts.analysis",
+    "georisk.contexts.assessment",
+    "georisk.contexts.prediction",
+    "georisk.contexts.validation",
+    "georisk.contexts.reporting",
+]
+forbidden_modules = ["ee", "requests"]

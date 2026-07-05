@@ -1,0 +1,139 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: georisk
+      POSTGRES_USER: georisk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-georisk_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U georisk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: georisk
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-georisk_dev_minio}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src  # live-reload in dev; entrypoints/api.sh sets --reload when ENVIRONMENT=development
+
+  # Sprint 0 Review finding #1 / Remediation #1 (Critical): `command:` below
+  # is a SINGLE token — the queue name — matching worker.sh's `$1` usage
+  # exactly. Do not change this to `["worker", "gis"]` or equivalent; see
+  # docker/entrypoints/worker.sh's header comment for why that breaks.
+  worker-gis:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: ["gis"]
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-ai:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: ["ai"]
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-light:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: ["light"]
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-system:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: ["system"]
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  relay:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    entrypoint: ["./entrypoints/relay.sh"]
+    command: []
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    # No outbox table exists until Roadmap Sprint 3 — the image's baked-in
+    # Celery HEALTHCHECK doesn't apply to this no-op process, so it's
+    # replaced with a trivial "is the script still running" check.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f relay.sh || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  beat:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    entrypoint: ["./entrypoints/beat.sh"]
+    command: []
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  minio_data:
