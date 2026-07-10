@@ -17,12 +17,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from georisk.contexts.analysis.domain.events import StageResultComputed, StageResultFailed
+from georisk.contexts.analysis.domain.events import (
+    RiskLayerGenerated,
+    StageResultComputed,
+    StageResultFailed,
+)
 from georisk.contexts.analysis.domain.value_objects import (
     ComputationSnapshot,
     ConfidenceTier,
     HazardType,
     IndicatorSet,
+    RiskLayerId,
     StageResultId,
     StageResultStatus,
     StageType,
@@ -148,3 +153,95 @@ class StageResult:
             error=error,
         )
         return result, event
+
+
+@dataclass(slots=True)
+class RiskLayer:
+    """Sprint C — a real spatial artifact derived from one completed RISK
+    ``StageResult`` plus a genuinely-uploaded (Sprint B) geometry
+    dataset. Immutable once generated, same "insert-only, latest version
+    wins" discipline as ``StageResult``/``Dataset``/``PredictionRun`` — a
+    regeneration (e.g. the RISK stage re-runs with new inputs) creates a
+    new version, never overwrites, so a prior version's exact GeoJSON
+    stays auditable.
+
+    ``dataset_id`` is a soft, plain-string cross-context reference to Data
+    Acquisition's ``Dataset`` (the geometry source) — same convention as
+    ``assessment_id``'s reference to the peer Assessment context.
+    ``geojson`` is the complete, real RFC 7946 ``FeatureCollection`` this
+    aggregate exists to serve; nothing about its features is fabricated
+    (every one traces back to a real uploaded Shapefile feature — see
+    ``infrastructure/risk_layer_generator.py``).
+    """
+
+    id: RiskLayerId
+    tenant_id: TenantId
+    assessment_id: str
+    hazard_type: HazardType
+    stage_type: StageType
+    stage_result_id: StageResultId
+    dataset_id: str
+    version: int
+    geometry_type: str
+    feature_count: int
+    bounding_box: tuple[float, float, float, float]
+    crs: str
+    risk_index: float
+    risk_level: str
+    classification: str
+    formula_version: str
+    geojson: dict
+    generated_at: datetime
+
+    @classmethod
+    def generate(
+        cls,
+        *,
+        tenant_id: TenantId,
+        assessment_id: str,
+        hazard_type: HazardType,
+        stage_type: StageType,
+        stage_result_id: StageResultId,
+        dataset_id: str,
+        version: int,
+        geometry_type: str,
+        feature_count: int,
+        bounding_box: tuple[float, float, float, float],
+        crs: str,
+        risk_index: float,
+        risk_level: str,
+        classification: str,
+        formula_version: str,
+        geojson: dict,
+    ) -> tuple[RiskLayer, RiskLayerGenerated]:
+        layer = cls(
+            id=RiskLayerId.new(),
+            tenant_id=tenant_id,
+            assessment_id=assessment_id,
+            hazard_type=hazard_type,
+            stage_type=stage_type,
+            stage_result_id=stage_result_id,
+            dataset_id=dataset_id,
+            version=version,
+            geometry_type=geometry_type,
+            feature_count=feature_count,
+            bounding_box=bounding_box,
+            crs=crs,
+            risk_index=risk_index,
+            risk_level=risk_level,
+            classification=classification,
+            formula_version=formula_version,
+            geojson=geojson,
+            generated_at=datetime.now(UTC),
+        )
+        event = RiskLayerGenerated(
+            risk_layer_id=str(layer.id),
+            tenant_id=str(tenant_id),
+            assessment_id=assessment_id,
+            hazard_type=hazard_type.value,
+            stage_type=stage_type.value,
+            dataset_id=dataset_id,
+            feature_count=feature_count,
+            version=version,
+        )
+        return layer, event

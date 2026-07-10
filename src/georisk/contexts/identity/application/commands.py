@@ -8,6 +8,9 @@ transactions, not one transaction touching two aggregates).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+
+from georisk.contexts.identity.application.ports import AccessTokenClaims
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +92,24 @@ class RefreshAccessToken:
 @dataclass(frozen=True, slots=True)
 class Logout:
     refresh_token: str
+    # Sprint D: populated only when the caller's request also carried a
+    # (decodable, not-yet-expired) ``Authorization`` bearer header — logout
+    # remains fully functional without one (backward compatible with every
+    # pre-Sprint-D client that only ever sent ``refresh_token``), but when
+    # present, that specific access token is revoked too, not just the
+    # refresh token — see ``handlers_auth.py``'s ``LogoutHandler``.
+    access_token_claims: AccessTokenClaims | None = None
+    access_token_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RevokeAllSessions:
+    """Self-service only — always acts on the calling, already-authenticated
+    user (``current_user.id`` from the route), never on an arbitrary user
+    ID an admin supplies, so there's no cross-tenant surface to check here
+    unlike ``SuspendUser``/``DeactivateUser``."""
+
+    user_id: str
 
 
 @dataclass(frozen=True, slots=True)

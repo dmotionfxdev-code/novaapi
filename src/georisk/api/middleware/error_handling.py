@@ -46,6 +46,10 @@ _STATUS_MAP: dict[type[Exception], int] = {
     domain_errors.IllegalStateTransitionError: 409,
     domain_errors.ConcurrencyConflictError: 409,
     domain_errors.IdempotencyConflictError: 409,
+    # Sprint D: application-layer rate limiting (api/middleware/
+    # rate_limiting.py) — the one entry this module's original docstring
+    # comment predicted "growing by one" for.
+    domain_errors.RateLimitExceededError: 429,
 }
 
 
@@ -69,7 +73,28 @@ def _problem_response(request: Request, exc: Exception, status: int) -> JSONResp
         "traceId": _trace_id(request),
         "errors": getattr(exc, "field_errors", []),
     }
-    return JSONResponse(status_code=status, content=body)
+    response = JSONResponse(status_code=status, content=body)
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    if retry_after is not None:
+        response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
+# Sprint D exception hardening: every mapped domain error above (400-429)
+# already carries a message the domain/application layer deliberately
+# crafted to be safe to show a client (e.g. "Invalid email or password") —
+# those pass through _problem_response's str(exc) unchanged, as before.
+# An exception that reaches the line below, by contrast, is one NO layer
+# of this codebase recognized or intended to surface — its message may be
+# a raw SQL error, a file path, a third-party library's internal repr, or
+# anything else never vetted for a client to see. Sprint D closes the one
+# confirmed leak this project's own SECURITY_REVIEW.md documented: this
+# generic message (plus the type name below) replaces whatever str(exc)
+# would otherwise have been; the real exception is still logged in full
+# server-side (with its traceId) for a support engineer to look up.
+_SAFE_UNHANDLED_MESSAGE = (
+    "An unexpected error occurred. Please contact support with this trace ID."
+)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -85,8 +110,22 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:
-        # Never leak an internal stack trace to the client — log it fully,
-        # return an opaque 500 with only the traceId a support engineer can
-        # look up in the logs.
-        logger.exception("Unhandled exception", extra={"path": str(request.url.path)})
-        return _problem_response(request, exc, 500)
+        # Never leak an internal stack trace — or even the internal
+        # exception's own message/class name — to the client: log it in
+        # full server-side, return only a generic message, the correct
+        # 500 status, and a traceId a support engineer can look up against
+        # that log line.
+        trace_id = _trace_id(request)
+        logger.exception(
+            "Unhandled exception", extra={"path": str(request.url.path), "traceId": trace_id}
+        )
+        body = {
+            "type": "https://docs.firas.dev/errors/InternalServerError",
+            "title": "InternalServerError",
+            "status": 500,
+            "detail": _SAFE_UNHANDLED_MESSAGE,
+            "instance": str(request.url.path),
+            "traceId": trace_id,
+            "errors": [],
+        }
+        return JSONResponse(status_code=500, content=body)

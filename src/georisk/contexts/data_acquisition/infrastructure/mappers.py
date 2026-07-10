@@ -273,6 +273,13 @@ def acquisition_job_to_domain(model: AcquisitionJobModel) -> AcquisitionJob:
         ),
         extracted_features=model.extracted_features,
         skipped_features=model.skipped_features,
+        shapefile_geometry_type=model.shapefile_geometry_type,
+        shapefile_feature_count=model.shapefile_feature_count,
+        shapefile_bounding_box=(
+            tuple(model.shapefile_bounding_box) if model.shapefile_bounding_box else None
+        ),
+        shapefile_crs=model.shapefile_crs,
+        shapefile_attributes=model.shapefile_attributes,
     )
 
 
@@ -315,3 +322,10 @@ def apply_acquisition_job_to_model(entity: AcquisitionJob, model: AcquisitionJob
     model.applied_preprocessing = [step.value for step in entity.applied_preprocessing]
     model.extracted_features = entity.extracted_features
     model.skipped_features = entity.skipped_features
+    model.shapefile_geometry_type = entity.shapefile_geometry_type
+    model.shapefile_feature_count = entity.shapefile_feature_count
+    model.shapefile_bounding_box = (
+        list(entity.shapefile_bounding_box) if entity.shapefile_bounding_box else None
+    )
+    model.shapefile_crs = entity.shapefile_crs
+    model.shapefile_attributes = entity.shapefile_attributes

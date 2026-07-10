@@ -12,6 +12,7 @@ from georisk.contexts.identity.domain.tokens import (
     InvitationToken,
     PasswordResetToken,
     RefreshToken,
+    RevokedAccessToken,
 )
 from georisk.contexts.identity.domain.value_objects import (
     ROLE_PERMISSIONS,
@@ -125,6 +126,18 @@ def test_deactivated_user_cannot_be_suspended() -> None:
         user.suspend(changed_by="admin")
 
 
+def test_revoke_all_sessions_bumps_token_generation() -> None:
+    role = _role(RoleName.ANALYST)
+    user, _ = User.create_owner(
+        tenant_id=TenantId.new(), email="u@acme.test", hashed_password="h", owner_role=role
+    )
+    assert user.token_generation == 0
+    user.revoke_all_sessions()
+    assert user.token_generation == 1
+    user.revoke_all_sessions()
+    assert user.token_generation == 2
+
+
 def test_change_role_emits_event_with_old_and_new_role() -> None:
     viewer = _role(RoleName.VIEWER)
     admin = _role(RoleName.ADMIN)
@@ -190,3 +203,16 @@ def test_invitation_token_expires() -> None:
     token = InvitationToken.issue(user_id=UserId.new(), tenant_id=TenantId.new(), token_hash="h")
     future = datetime.now(UTC) + timedelta(days=8)
     assert token.is_valid(now=future) is False
+
+
+def test_revoked_access_token_issue_carries_jti_and_expiry() -> None:
+    user_id, tenant_id = UserId.new(), TenantId.new()
+    expires_at = datetime.now(UTC) + timedelta(hours=8)
+    entry = RevokedAccessToken.issue(
+        jti="a-jti-value", user_id=user_id, tenant_id=tenant_id, expires_at=expires_at
+    )
+    assert entry.jti == "a-jti-value"
+    assert entry.user_id == user_id
+    assert entry.tenant_id == tenant_id
+    assert entry.expires_at == expires_at
+    assert entry.revoked_at <= datetime.now(UTC)

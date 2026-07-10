@@ -45,6 +45,22 @@ dependencies = [
     # `requests` above (`ee` was in that contract's `forbidden_modules`
     # list from Sprint 0 onward, always intended for this sprint).
     "earthengine-api==1.7.33",
+    # Data Acquisition (Sprint B): real ESRI Shapefile ingestion —
+    # ``infrastructure/shapefile_importer.py``, superseding
+    # ``validate_shapefile``'s original magic-byte-only placeholder.
+    # ``pyogrio`` (GDAL/OGR bindings) reads geometries/attributes/CRS/
+    # feature count/bounding box; ``shapely`` (GEOS bindings) inspects
+    # each feature's actual WKB geometry type (the Shapefile format has no
+    # distinct "MultiPolygon" shape-type code, so the header-level type
+    # alone under-reports true multi-part features — see
+    # ``shapefile_importer.py``'s module docstring for the full
+    # library-choice justification). Both ship self-contained manylinux
+    # wheels — no system libgdal/GEOS needed, same "minimal system
+    # dependencies" reasoning as every other infra choice in this project.
+    # Same import-linter exemption pattern as `requests`/`earthengine-api`
+    # above — this is the sprint both exemptions were added for.
+    "pyogrio==0.13.0",
+    "shapely==2.1.2",
 ]
 # Hazard-specific dependencies (geopandas, rasterio, shapely, scikit-learn,
 # xgboost, earthengine-api) are deliberately NOT added in Sprint 0 — they
@@ -63,6 +79,14 @@ dev = [
     "import-linter==2.1",
     "pre-commit==4.0.1",
     "pip-audit==2.7.3",
+    # Sprint B test fixtures only: genuinely writes ESRI Shapefile bytes
+    # (.shp/.shx/.dbf) for test cases to zip up and feed through the real
+    # ingestion pipeline — never imported by production code, which reads
+    # Shapefiles via ``pyogrio``/``shapely`` instead (a mature reader and
+    # a mature writer are different tools; pyshp is a well-established,
+    # pure-Python writer with no GDAL dependency, appropriate for
+    # generating small test fixtures).
+    "pyshp==3.1.4",
 ]
 
 [tool.setuptools.packages.find]
@@ -96,6 +120,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "celery.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pyogrio.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "shapely.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -262,4 +294,4 @@ source_modules = [
     "georisk.contexts.validation",
     "georisk.contexts.reporting",
 ]
-forbidden_modules = ["ee", "requests"]
+forbidden_modules = ["ee", "requests", "pyogrio", "shapely"]

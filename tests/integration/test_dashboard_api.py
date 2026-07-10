@@ -18,6 +18,10 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import (
+    seed_firas_indicator_datasets_sync,
+    seed_real_firas_hazard_observations_sync,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -25,6 +29,14 @@ _SQUARE_GEOJSON = {
     "type": "Polygon",
     "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
 }
+
+# Sprint A: CompositionRootPredictionDataProvider reads real completed
+# Analysis outputs instead of StubPredictionDataProvider's on-demand
+# synthetic fabrication — see test_prediction_api.py for why these exact,
+# non-collinear values.
+_NDVI_VALUES = [0.10, 0.22, 0.15, 0.30, 0.18, 0.35, 0.12, 0.28, 0.20, 0.33]
+_WIND_SPEED_VALUES = [0.30, 0.55, 0.80, 0.42, 0.95, 0.28, 0.71, 0.60, 0.90, 0.48]
+_BURNED_AREA_VALUES = [0.05, 0.31, 0.02, 0.28, 0.15, 0.09, 0.33, 0.04, 0.22, 0.17]
 
 
 @pytest.fixture
@@ -41,6 +53,11 @@ def api_client():  # noqa: ANN201
 
 
 def _register_and_login(client: TestClient, suffix: str) -> dict:
+    headers, _tenant_id = _register_and_login_with_tenant(client, suffix)
+    return headers
+
+
+def _register_and_login_with_tenant(client: TestClient, suffix: str) -> tuple[dict, str]:
     registration = client.post(
         "/api/v1/tenants",
         json={
@@ -51,14 +68,23 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         },
     )
     assert registration.status_code == 201, registration.text
+    tenant_id = registration.json()["tenant"]["id"]
     owner_email = registration.json()["owner"]["email"]
+    # Sprint A: AnalysisStageExecutor now reads real Data Acquisition
+    # datasets (CompositionRootIndicatorInputProvider), not
+    # StubIndicatorInputProvider — seed the exact values the stub used to
+    # fabricate, as a real cataloged dataset, so a FIRAS workflow started
+    # for this tenant still runs to completion with the same exact
+    # indicator values this file's assertions depend on.
+    seed_firas_indicator_datasets_sync(os.environ["DATABASE_URL"], tenant_id)
 
     login = client.post(
         "/api/v1/auth/token",
         json={"email": owner_email, "password": "correct-horse-battery-staple"},
     )
     assert login.status_code == 200, login.text
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    return headers, tenant_id
 
 
 def _run_firas_workflow_to_validated(client: TestClient, headers: dict, suffix: str) -> str:
@@ -297,8 +323,17 @@ def test_all_eight_dashboards_reflect_genuinely_produced_cross_context_data(
     api_client: TestClient,
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
-    headers = _register_and_login(api_client, suffix)
+    headers, tenant_id = _register_and_login_with_tenant(api_client, suffix)
     assessment_id = _run_firas_workflow_to_validated(api_client, headers, suffix)
+
+    observations = [
+        {"ndvi": ndvi, "wind_speed": wind, "burned_area": burned}
+        for ndvi, wind, burned in zip(
+            _NDVI_VALUES, _WIND_SPEED_VALUES, _BURNED_AREA_VALUES, strict=True
+        )
+    ]
+    seed_real_firas_hazard_observations_sync(os.environ["DATABASE_URL"], tenant_id, observations)
+
     _attach_mlr_prediction_and_regression_validation(api_client, headers, assessment_id)
     _catalog_a_dataset(api_client, headers)
     _create_alert_and_subscription_and_evaluate(api_client, headers, assessment_id)

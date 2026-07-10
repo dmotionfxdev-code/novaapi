@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -66,3 +66,47 @@ class StageResultModel(Base):
     strategy_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     formula_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class RiskLayerModel(Base):
+    """Sprint C — the ``RiskLayer`` aggregate's persistence. ``geojson``
+    stores the complete, real ``FeatureCollection`` as JSONB (same
+    "large generated blob as one JSONB column" convention as
+    ``StageResult.snapshot``/``AcquisitionJob.provenance``/Reporting's
+    own frozen section snapshots) — requirement #6's "persist using
+    existing storage conventions," not a new object-storage mechanism.
+    """
+
+    __tablename__ = "risk_layer"
+    __table_args__ = (
+        Index(
+            "ix_risk_layer_assessment_stage_version",
+            "assessment_id",
+            "stage_type",
+            "version",
+        ),
+        {"schema": _SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    assessment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    hazard_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    stage_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    stage_result_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Soft reference to data_acquisition.dataset.id — Data Acquisition is
+    # a peer context (import-linter's independence contract); never a
+    # declared FK, same convention as every other cross-context reference
+    # in this codebase (e.g. StageResultModel.assessment_id).
+    dataset_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    geometry_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    feature_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    bounding_box: Mapped[list] = mapped_column(JSONB, nullable=False)
+    crs: Mapped[str] = mapped_column(String(30), nullable=False)
+    risk_index: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    classification: Mapped[str] = mapped_column(String(50), nullable=False)
+    formula_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    geojson: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

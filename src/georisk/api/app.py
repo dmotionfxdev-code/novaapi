@@ -15,6 +15,7 @@ import redis.asyncio as redis_asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from georisk.api.analysis_ports import CompositionRootIndicatorInputProvider
 from georisk.api.dashboard_ports import (
     CompositionRootAssessmentReader as CompositionRootDashboardAssessmentReader,
 )
@@ -43,6 +44,7 @@ from georisk.api.notification_ports import (
     CompositionRootAssessmentReader as CompositionRootNotificationAssessmentReader,
 )
 from georisk.api.prediction_ports import (
+    CompositionRootPredictionDataProvider,
     CompositionRootSamplingCampaignReader,
     CompositionRootVariableSelectionReader,
 )
@@ -53,6 +55,7 @@ from georisk.api.reporting_ports import (
     CompositionRootStageResultReader,
     CompositionRootValidationReader,
 )
+from georisk.api.risk_layer_ports import CompositionRootRiskLayerService
 from georisk.api.routes.health import router as health_router
 from georisk.api.validation_ports import CompositionRootRegressionValidationSubjectResolver
 from georisk.api.workflow_stage_executors import (
@@ -62,6 +65,7 @@ from georisk.api.workflow_stage_executors import (
 )
 from georisk.contexts.analysis.application.strategy_registry import StrategyRegistry
 from georisk.contexts.analysis.domain.value_objects import HazardType as AnalysisHazardType
+from georisk.contexts.analysis.interface.routes import risk_layer_router
 from georisk.contexts.analysis.interface.routes import router as stage_result_router
 from georisk.contexts.analysis.strategies.firas.strategy import FIRASHazardStrategy
 from georisk.contexts.analysis.strategies.wrras.strategy import WRRASHazardStrategy
@@ -103,7 +107,6 @@ from georisk.contexts.notification.interface.routes import (
 from georisk.contexts.notification.interface.routes import (
     subscription_router as notification_subscription_router,
 )
-from georisk.contexts.prediction.application.ports import StubPredictionDataProvider
 from georisk.contexts.prediction.interface.routes import router as prediction_router
 from georisk.contexts.reporting.interface.routes import (
     dashboard_router,
@@ -115,6 +118,7 @@ from georisk.contexts.validation.interface.routes import router as validation_ro
 from georisk.db.session import Database
 from georisk.observability.logging import configure_logging
 from georisk.observability.tracing import configure_tracing, instrument_app, shutdown_tracing
+from georisk.rate_limiting import RateLimiter
 from georisk.settings import Settings, get_settings
 
 
@@ -143,6 +147,32 @@ def _make_lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncConte
 
         app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
         app.state.redis = redis_asyncio.from_url(settings.redis_url, decode_responses=True)
+        # Sprint D: a dedicated connection (own logical DB, ``redis_
+        # ratelimit_url``) rather than reusing ``app.state.redis`` — the
+        # two serve unrelated purposes (health-check liveness vs. request
+        # counters) and Sprint 0 already provisioned a separate URL for
+        # this exact purpose, unused until now. Constructing the client
+        # here never blocks/fails even if Redis is unreachable (lazy
+        # connection, identical to ``app.state.redis`` above) — RateLimiter
+        # itself is what falls back to an in-process counter per request
+        # if Redis turns out to be down when actually used.
+        rate_limit_redis = redis_asyncio.from_url(
+            settings.redis_ratelimit_url, decode_responses=True
+        )
+        app.state.rate_limiter = RateLimiter(rate_limit_redis)
+        # Bucket name -> (limit, window_seconds), read from THIS app's own
+        # explicit `settings` — see rate_limiting.py's `_limit_for` for why
+        # this must not be `get_settings()`. One entry per Sprint D
+        # requirement #2 bullet point.
+        app.state.rate_limits = {
+            "login": (settings.rate_limit_login_per_minute, 60),
+            "registration": (settings.rate_limit_registration_per_hour, 3600),
+            "password-reset": (settings.rate_limit_password_reset_per_hour, 3600),
+            "token-refresh": (settings.rate_limit_token_refresh_per_minute, 60),
+            "analysis-execution": (settings.rate_limit_analysis_execution_per_minute, 60),
+            "prediction-execution": (settings.rate_limit_prediction_execution_per_minute, 60),
+            "upload": (settings.rate_limit_upload_per_minute, 60),
+        }
 
         # Sprint 5: registering FIRASHazardStrategy is the platform-facing
         # step the brief's success test is built around ("only a strategy
@@ -153,7 +183,20 @@ def _make_lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncConte
         strategy_registry = StrategyRegistry()
         strategy_registry.register(AnalysisHazardType.FLOOD, FIRASHazardStrategy())
         strategy_registry.register(AnalysisHazardType.WILDFIRE, WRRASHazardStrategy())
-        analysis_executor = AnalysisStageExecutor(app.state.db, strategy_registry)
+        # Sprint A: real, Data-Acquisition-backed indicator inputs —
+        # replaces the implicit StubIndicatorInputProvider default
+        # AnalysisStageExecutor falls back to when no provider is passed
+        # explicitly (that default still exists for tests that construct
+        # AnalysisStageExecutor directly without one; production runtime
+        # always passes this real provider instead).
+        # Sprint C: automatic real spatial Risk Layer generation
+        # (requirement #8) — best-effort, wired only for the RISK stage.
+        analysis_executor = AnalysisStageExecutor(
+            app.state.db,
+            strategy_registry,
+            CompositionRootIndicatorInputProvider(app.state.db),
+            CompositionRootRiskLayerService(app.state.db),
+        )
 
         # Sprint 4: the VALIDATION stage runs Validation's own
         # RunValidationCommand pipeline; Sprint 5: Hazard/Exposure/
@@ -187,7 +230,9 @@ def _make_lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncConte
         app.state.prediction_sampling_campaign_reader = CompositionRootSamplingCampaignReader(
             app.state.db
         )
-        app.state.prediction_data_provider = StubPredictionDataProvider()
+        # Sprint A: real, Analysis-Engine-backed observations — replaces
+        # StubPredictionDataProvider's synthetic rows.
+        app.state.prediction_data_provider = CompositionRootPredictionDataProvider(app.state.db)
 
         # Sprint 9: Reporting's read-only ports into Assessment (+
         # Geospatial's AOI/SamplingCampaign), Analysis Engine's
@@ -310,6 +355,7 @@ def _make_lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncConte
         yield
 
         await app.state.redis.aclose()
+        await rate_limit_redis.aclose()
         await app.state.db.dispose()
         shutdown_tracing()
 
@@ -386,6 +432,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # convenience; its router never imports anything from
     # contexts.assessment.
     app.include_router(stage_result_router, prefix="/api/v1")
+
+    # Sprint C: real spatial Risk Layer read-only routes
+    # (/assessments/{id}/risk-layer[.geojson], /assessments/{id}/risk-summary)
+    # — same context, same URL-path-convenience/no-cross-import reasoning
+    # as stage_result_router directly above.
+    app.include_router(risk_layer_router, prefix="/api/v1")
 
     # Geospatial context (Sprint 7) — an independent peer bounded context,
     # AOI/SamplingCampaign nested under /assessments/{id}/... purely as a

@@ -75,3 +75,16 @@ class IdempotencyConflictError(DomainError):
     than its first use (Application Layer §11) — distinct from a true
     replay, which returns the original response rather than raising.
     """
+
+
+class RateLimitExceededError(DomainError):
+    """Sprint D — the caller has exceeded an application-layer rate limit
+    on a specific action (login, registration, password reset, token
+    refresh, analysis/prediction execution, or upload). Maps to 429, not
+    400/403: the request is well-formed and the caller may be fully
+    authorized — they've simply made too many of them, too fast.
+    """
+
+    def __init__(self, message: str, *, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds

@@ -15,15 +15,21 @@ imports this module — it's wired in only where
 
 from __future__ import annotations
 
+import contextlib
+
 from georisk.contexts.analysis.application.commands import RecordStageResultCommand
 from georisk.contexts.analysis.application.handlers import RecordStageResultHandler
 from georisk.contexts.analysis.application.ports import (
     IndicatorInputProvider,
+    RiskLayerGenerationPort,
     StubIndicatorInputProvider,
 )
 from georisk.contexts.analysis.application.strategy_registry import StrategyRegistry
 from georisk.contexts.analysis.domain.value_objects import (
     StageResultStatus as AnalysisStageResultStatus,
+)
+from georisk.contexts.analysis.domain.value_objects import (
+    StageType as AnalysisStageType,
 )
 from georisk.contexts.assessment.application.workflow_engine import (
     StageExecutionOutcome,
@@ -168,12 +174,17 @@ class AnalysisStageExecutor:
         db: Database,
         registry: StrategyRegistry,
         input_provider: IndicatorInputProvider | None = None,
+        risk_layer_service: RiskLayerGenerationPort | None = None,
     ) -> None:
         self._db = db
         self._registry = registry
         self._input_provider = (
             input_provider if input_provider is not None else StubIndicatorInputProvider()
         )
+        # Sprint C: optional — tests/callers that don't pass one simply
+        # never get a generated risk layer, no behavior change to the
+        # actual Analysis computation this class exists to run.
+        self._risk_layer_service = risk_layer_service
 
     async def execute(self, stage_type: StageType, *, assessment_id: str) -> StageExecutionOutcome:
         async with self._db.session() as session:
@@ -207,5 +218,22 @@ class AnalysisStageExecutor:
 
         if result.status is AnalysisStageResultStatus.FAILED:
             return StageExecutionOutcome(success=False, error=result.error)
+
+        # Sprint C requirement #8: automatic, no manual regeneration step.
+        # Best-effort and never allowed to turn an already-successful RISK
+        # computation into a failed stage — a missing/non-Shapefile
+        # geometry source is an expected, benign outcome the service
+        # itself already handles silently; suppressing here is
+        # belt-and-braces against any OTHER unexpected failure in that path.
+        is_risk_stage = stage_type.value == AnalysisStageType.RISK.value
+        if self._risk_layer_service is not None and is_risk_stage:
+            with contextlib.suppress(Exception):
+                await self._risk_layer_service.generate_if_possible(
+                    tenant_id=tenant_id,
+                    assessment_id=assessment_id,
+                    hazard_type=hazard_type,
+                    stage_result_id=str(result.id),
+                    issued_by="system:workflow-engine",
+                )
 
         return StageExecutionOutcome(success=True, stage_result_ref=str(result.id))

@@ -71,10 +71,17 @@ from georisk.contexts.data_acquisition.interface.schemas import (
 )
 from georisk.contexts.identity.application.ports import AccessTokenClaims
 from georisk.contexts.identity.domain.value_objects import PermissionCode
-from georisk.contexts.identity.interface.dependencies import require_permission
+from georisk.contexts.identity.interface.dependencies import get_current_claims, require_permission
 from georisk.db.session import get_session
+from georisk.rate_limiting import rate_limit_by_tenant
 
 router = APIRouter(tags=["data-acquisition"])
+
+
+async def _tenant_id_from_claims(
+    claims: Annotated[AccessTokenClaims, Depends(get_current_claims)],
+) -> str:
+    return str(claims.tenant_id)
 
 
 def _provider_registry(request: Request) -> ProviderRegistry:
@@ -331,7 +338,14 @@ async def list_acquisition_jobs(
     return AcquisitionJobListResponse.from_domain(jobs)
 
 
-@router.post("/acquisition-jobs", response_model=AcquisitionJobResponse, status_code=201)
+@router.post(
+    "/acquisition-jobs",
+    response_model=AcquisitionJobResponse,
+    status_code=201,
+    dependencies=[
+        Depends(rate_limit_by_tenant("upload", tenant_id_dependency=_tenant_id_from_claims))
+    ],
+)
 async def schedule_acquisition_job(
     body: ScheduleAcquisitionJobRequest,
     claims: Annotated[

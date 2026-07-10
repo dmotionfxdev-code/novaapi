@@ -46,3 +46,23 @@ class StageResultFailed:
 
     def payload(self) -> dict:
         return {k: v for k, v in asdict(self).items() if k != "event_type"}
+
+
+@dataclass(frozen=True, slots=True)
+class RiskLayerGenerated:
+    """Sprint C — fires whenever the Risk Layer Generator successfully
+    produces a real spatial ``RiskLayer`` from a completed RISK-stage
+    ``StageResult`` plus a genuinely-uploaded geometry dataset."""
+
+    event_type: ClassVar[str] = "analysis.RiskLayerGenerated"
+    risk_layer_id: str
+    tenant_id: str
+    assessment_id: str
+    hazard_type: str
+    stage_type: str
+    dataset_id: str
+    feature_count: int
+    version: int
+
+    def payload(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if k != "event_type"}

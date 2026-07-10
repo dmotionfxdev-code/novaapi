@@ -32,7 +32,11 @@ from georisk.contexts.identity.domain.errors import (
     RoleNotFoundError,
     UserNotFoundError,
 )
-from georisk.contexts.identity.domain.events import PasswordChanged, UserStatusChanged
+from georisk.contexts.identity.domain.events import (
+    AllSessionsRevoked,
+    PasswordChanged,
+    UserStatusChanged,
+)
 from georisk.contexts.identity.domain.tokens import InvitationToken
 from georisk.contexts.identity.domain.value_objects import RoleName, TenantId, UserId
 from georisk.contexts.identity.infrastructure.repositories import (
@@ -213,6 +217,7 @@ class SuspendUserHandler:
         await _assert_not_last_owner(user_repo, user, user.tenant_id)
 
         event = user.suspend(changed_by=command.changed_by, reason=command.reason)
+        user.revoke_all_sessions()
         await user_repo.save(user, expected_version=user.version)
         await self._revoke_sessions_and_append(user, event)
         return user
@@ -226,6 +231,16 @@ class SuspendUserHandler:
             aggregate_id=str(user.id),
             event_type=event.event_type,
             payload=event.payload(),
+            tenant_id=user.tenant_id.value,
+        )
+        await append_event(
+            self._session,
+            aggregate_type="User",
+            aggregate_id=str(user.id),
+            event_type=AllSessionsRevoked.event_type,
+            payload=AllSessionsRevoked(
+                user_id=str(user.id), tenant_id=str(user.tenant_id), reason="user suspended"
+            ).payload(),
             tenant_id=user.tenant_id.value,
         )
         await self._session.commit()
@@ -270,6 +285,7 @@ class DeactivateUserHandler:
         await _assert_not_last_owner(user_repo, user, user.tenant_id)
 
         event = user.deactivate_account(changed_by=command.changed_by, reason=command.reason)
+        user.revoke_all_sessions()
         await user_repo.save(user, expected_version=user.version)
 
         refresh_repo = SqlAlchemyRefreshTokenRepository(self._session)
@@ -281,6 +297,16 @@ class DeactivateUserHandler:
             aggregate_id=str(user.id),
             event_type=event.event_type,
             payload=event.payload(),
+            tenant_id=user.tenant_id.value,
+        )
+        await append_event(
+            self._session,
+            aggregate_type="User",
+            aggregate_id=str(user.id),
+            event_type=AllSessionsRevoked.event_type,
+            payload=AllSessionsRevoked(
+                user_id=str(user.id), tenant_id=str(user.tenant_id), reason="user deactivated"
+            ).payload(),
             tenant_id=user.tenant_id.value,
         )
         await self._session.commit()
@@ -305,6 +331,7 @@ class ChangePasswordHandler:
 
         PasswordPolicy.validate(command.new_password)
         user.set_password(self._password_hasher.hash(command.new_password))
+        user.revoke_all_sessions()
 
         await user_repo.save(user, expected_version=user.version)
 
@@ -317,6 +344,16 @@ class ChangePasswordHandler:
             aggregate_id=str(user.id),
             event_type=PasswordChanged.event_type,
             payload=PasswordChanged(user_id=str(user.id), tenant_id=str(user.tenant_id)).payload(),
+            tenant_id=user.tenant_id.value,
+        )
+        await append_event(
+            self._session,
+            aggregate_type="User",
+            aggregate_id=str(user.id),
+            event_type=AllSessionsRevoked.event_type,
+            payload=AllSessionsRevoked(
+                user_id=str(user.id), tenant_id=str(user.tenant_id), reason="password changed"
+            ).payload(),
             tenant_id=user.tenant_id.value,
         )
         await self._session.commit()

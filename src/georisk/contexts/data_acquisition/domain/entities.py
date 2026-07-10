@@ -385,6 +385,14 @@ class AcquisitionJob:
     applied_preprocessing: tuple[PreprocessingStep, ...]
     extracted_features: dict[str, float] | None
     skipped_features: dict[str, str] | None
+    # --- Sprint B: real ESRI Shapefile ingestion, all additive/optional so
+    # every non-Shapefile job (and every Sprint 13/14 job that predates
+    # this sprint) leaves these at their "not applicable" defaults. ---
+    shapefile_geometry_type: str | None
+    shapefile_feature_count: int | None
+    shapefile_bounding_box: tuple[float, float, float, float] | None
+    shapefile_crs: str | None
+    shapefile_attributes: dict[str, object] | None
 
     @classmethod
     def schedule(
@@ -462,6 +470,11 @@ class AcquisitionJob:
             applied_preprocessing=(),
             extracted_features=None,
             skipped_features=None,
+            shapefile_geometry_type=None,
+            shapefile_feature_count=None,
+            shapefile_bounding_box=None,
+            shapefile_crs=None,
+            shapefile_attributes=None,
         )
         event = AcquisitionJobScheduled(
             acquisition_job_id=str(job.id),
@@ -491,6 +504,12 @@ class AcquisitionJob:
         applied_preprocessing: tuple[PreprocessingStep, ...] = (),
         extracted_features: dict[str, float] | None = None,
         skipped_features: dict[str, str] | None = None,
+        shapefile_geometry_type: str | None = None,
+        shapefile_feature_count: int | None = None,
+        shapefile_bounding_box: tuple[float, float, float, float] | None = None,
+        shapefile_crs: str | None = None,
+        shapefile_attributes: dict[str, object] | None = None,
+        shapefile_importer_version: str | None = None,
     ) -> AcquisitionJobCompleted:
         if self.status != AcquisitionJobStatus.RUNNING:
             raise IllegalAcquisitionJobTransitionError(
@@ -502,9 +521,26 @@ class AcquisitionJob:
         self.applied_preprocessing = applied_preprocessing
         self.extracted_features = extracted_features
         self.skipped_features = skipped_features
+        self.shapefile_geometry_type = shapefile_geometry_type
+        self.shapefile_feature_count = shapefile_feature_count
+        self.shapefile_bounding_box = shapefile_bounding_box
+        self.shapefile_crs = shapefile_crs
+        self.shapefile_attributes = shapefile_attributes
         description = "Fetched, validated, and catalogued successfully"
         if extracted_features:
             description += f"; extracted features: {sorted(extracted_features)}"
+        if shapefile_geometry_type is not None:
+            # Sprint B requirement #5 — Provenance: original filename
+            # (``source_reference``), CRS, geometry type, feature count,
+            # bounding box, and importer version, all recorded via this
+            # existing ``ProvenanceEntry``, timestamped by
+            # ``ProvenanceEntry.now()`` below (the "upload timestamp").
+            description += (
+                f"; Shapefile import: file={self.source_reference!r}, "
+                f"geometry_type={shapefile_geometry_type}, "
+                f"features={shapefile_feature_count}, crs={shapefile_crs}, "
+                f"bbox={shapefile_bounding_box}, importer={shapefile_importer_version}"
+            )
         self.provenance = (
             *self.provenance,
             ProvenanceEntry.now(

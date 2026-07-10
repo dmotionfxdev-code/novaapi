@@ -46,10 +46,15 @@ from georisk.contexts.data_acquisition.domain.entities import (
 )
 from georisk.contexts.data_acquisition.domain.errors import (
     AcquisitionJobNotFoundError,
+    CorruptedShapefileError,
     DatasetNotFoundError,
     DatasetSourceNotFoundError,
+    EmptyShapefileDatasetError,
+    InvalidShapefileCrsError,
+    UnsupportedShapefileGeometryError,
     VariableSelectionNotFoundError,
 )
+from georisk.contexts.data_acquisition.domain.events import DatasetCatalogued, DatasetRevised
 from georisk.contexts.data_acquisition.domain.feature_extraction import extract_features
 from georisk.contexts.data_acquisition.domain.validation import validate_dataset_content
 from georisk.contexts.data_acquisition.domain.value_objects import (
@@ -78,6 +83,11 @@ from georisk.contexts.data_acquisition.infrastructure.repositories import (
     SqlAlchemyDatasetSourceRepository,
     SqlAlchemyPredictorVariableRepository,
     SqlAlchemyVariableSelectionRepository,
+)
+from georisk.contexts.data_acquisition.infrastructure.shapefile_importer import (
+    SHAPEFILE_IMPORTER_VERSION,
+    ShapefileImportResult,
+    parse_shapefile_archive,
 )
 from georisk.contexts.identity.domain.value_objects import TenantId
 from georisk.db.outbox_writer import append_event
@@ -345,8 +355,23 @@ _DATASET_TYPE_BY_ACQUISITION_FORMAT: dict[AcquisitionFormat, DatasetType] = {
 }
 
 
-def _metadata_for_completed_job(job: AcquisitionJob) -> DatasetMetadata:
+def _metadata_for_completed_job(
+    job: AcquisitionJob, *, shapefile_result: ShapefileImportResult | None = None
+) -> DatasetMetadata:
     now = datetime.now(UTC)
+    if shapefile_result is not None:
+        # Sprint B: the REAL parsed CRS/bounding box (genuinely read from
+        # the archive's .prj/geometries via GDAL), not the merely-declared
+        # ``job.declared_crs`` / the generic placeholder text every other
+        # format still uses below.
+        crs = shapefile_result.crs
+        spatial_coverage = f"BBOX{shapefile_result.bounding_box} in {shapefile_result.crs}"
+    else:
+        crs = job.declared_crs
+        spatial_coverage = (
+            "Not derived — Sprint 13's Dataset Validation is structural "
+            "(format/CRS), not full geospatial extent computation"
+        )
     return DatasetMetadata(
         name=job.source_reference,
         dataset_type=_DATASET_TYPE_BY_ACQUISITION_FORMAT[job.format],
@@ -355,11 +380,8 @@ def _metadata_for_completed_job(job: AcquisitionJob) -> DatasetMetadata:
         acquisition_date=now.date(),
         spatial_resolution_m=None,
         temporal_resolution=None,
-        crs=job.declared_crs,
-        spatial_coverage=(
-            "Not derived — Sprint 13's Dataset Validation is structural "
-            "(format/CRS), not full geospatial extent computation"
-        ),
+        crs=crs,
+        spatial_coverage=spatial_coverage,
         temporal_coverage=DateRange(start=now, end=now),
         processing_method=ProcessingMethod.RAW,
         model_used=None,
@@ -520,6 +542,28 @@ class ExecuteAcquisitionJobHandler:
         if not outcome.is_valid:
             return await self._fail(job, tenant_id, "; ".join(outcome.errors))
 
+        # Sprint B: ``validate_dataset_content`` above only confirmed the
+        # ZIP is a *structurally complete* Shapefile dataset (has exactly
+        # one .shp plus its .shx/.dbf/.prj companions) — pure domain
+        # logic, no GIS library. The GENUINE parse (real geometries, real
+        # attributes, the actual per-feature geometry type, the real CRS,
+        # feature count, bounding box) happens here, in the application
+        # layer, via the one module allowed to import a GIS library
+        # (``infrastructure/shapefile_importer.py``). Any failure becomes
+        # a FAILED job with a specific, typed error message — never a
+        # generic exception, per requirement #6.
+        shapefile_result: ShapefileImportResult | None = None
+        if job.format is AcquisitionFormat.SHAPEFILE:
+            try:
+                shapefile_result = parse_shapefile_archive(fetch_result.content)
+            except (
+                CorruptedShapefileError,
+                EmptyShapefileDatasetError,
+                InvalidShapefileCrsError,
+                UnsupportedShapefileGeometryError,
+            ) as exc:
+                return await self._fail(job, tenant_id, str(exc))
+
         # Sprint 14 requirement #4 (Feature Extraction Pipeline): only
         # runs when the job actually asked for indices AND the provider
         # actually returned AOI-aggregate band statistics (only
@@ -543,14 +587,37 @@ class ExecuteAcquisitionJobHandler:
                     for index in job.requested_indices
                 }
 
-        metadata = _metadata_for_completed_job(job)
-        dataset, catalogued_event = Dataset.catalog(
-            tenant_id=tenant_id,
-            dataset_source_id=job.dataset_source_id,
-            metadata=metadata,
-            readiness=frozenset(),
-            catalogued_by=job.requested_by,
-        )
+        metadata = _metadata_for_completed_job(job, shapefile_result=shapefile_result)
+
+        # A repeated upload under the same name (Sprint B requirement #9's
+        # "duplicate upload" case, not format-specific — the identical
+        # ambiguity applies to any provider) must never independently
+        # ``Dataset.catalog()`` a second time: ``DatasetRepository
+        # .get_latest`` can't disambiguate between two CATALOGUED rows
+        # that both sit at version 1 under the same (tenant, name). If a
+        # dataset by this name already exists, this upload is a real
+        # revision of it — the exact ``Dataset.revise()``/
+        # ``mark_superseded()`` pair ``ReviseDatasetHandler`` already uses.
+        previous_dataset = await self._dataset_repo.get_latest(tenant_id, job.source_reference)
+        catalogued_event: DatasetCatalogued | DatasetRevised
+        if previous_dataset is None:
+            dataset, catalogued_event = Dataset.catalog(
+                tenant_id=tenant_id,
+                dataset_source_id=job.dataset_source_id,
+                metadata=metadata,
+                readiness=frozenset(),
+                catalogued_by=job.requested_by,
+            )
+        else:
+            dataset, catalogued_event = Dataset.revise(
+                previous=previous_dataset,
+                metadata=metadata,
+                readiness=previous_dataset.readiness,
+                description=f"Re-uploaded via AcquisitionJob {job.id}",
+                catalogued_by=job.requested_by,
+            )
+            previous_dataset.mark_superseded()
+            await self._dataset_repo.save(previous_dataset)
         await self._dataset_repo.save(dataset)
         await append_event(
             self._session,
@@ -566,6 +633,22 @@ class ExecuteAcquisitionJobHandler:
             applied_preprocessing=fetch_result.applied_preprocessing,
             extracted_features=computed_features or None,
             skipped_features=skipped_features or None,
+            shapefile_geometry_type=(
+                shapefile_result.geometry_type if shapefile_result is not None else None
+            ),
+            shapefile_feature_count=(
+                shapefile_result.feature_count if shapefile_result is not None else None
+            ),
+            shapefile_bounding_box=(
+                shapefile_result.bounding_box if shapefile_result is not None else None
+            ),
+            shapefile_crs=shapefile_result.crs if shapefile_result is not None else None,
+            shapefile_attributes=(
+                shapefile_result.first_feature_attributes if shapefile_result is not None else None
+            ),
+            shapefile_importer_version=(
+                SHAPEFILE_IMPORTER_VERSION if shapefile_result is not None else None
+            ),
         )
         await self._job_repo.save(job)
         await append_event(

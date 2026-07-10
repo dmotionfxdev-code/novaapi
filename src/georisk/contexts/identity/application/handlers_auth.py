@@ -28,6 +28,7 @@ from georisk.contexts.identity.application.commands import (
     RefreshAccessToken,
     RequestPasswordReset,
     ResetPassword,
+    RevokeAllSessions,
 )
 from georisk.contexts.identity.application.ports import (
     AccessTokenClaims,
@@ -46,6 +47,7 @@ from georisk.contexts.identity.domain.errors import (
     UserNotFoundError,
 )
 from georisk.contexts.identity.domain.events import (
+    AllSessionsRevoked,
     PasswordResetCompleted,
     PasswordResetRequested,
     RefreshTokenIssued,
@@ -55,10 +57,16 @@ from georisk.contexts.identity.domain.events import (
     UserLoggedIn,
     UserLoginFailed,
 )
-from georisk.contexts.identity.domain.tokens import PasswordResetToken, RefreshToken
+from georisk.contexts.identity.domain.tokens import (
+    PasswordResetToken,
+    RefreshToken,
+    RevokedAccessToken,
+)
+from georisk.contexts.identity.domain.value_objects import UserId
 from georisk.contexts.identity.infrastructure.repositories import (
     SqlAlchemyPasswordResetTokenRepository,
     SqlAlchemyRefreshTokenRepository,
+    SqlAlchemyRevokedAccessTokenRepository,
     SqlAlchemyUserRepository,
 )
 from georisk.db.outbox_writer import append_event
@@ -77,6 +85,7 @@ def _claims_for(user: User) -> AccessTokenClaims:
         tenant_id=user.tenant_id,
         role_name=user.role.name,
         permissions=user.role.permissions,
+        token_generation=user.token_generation,
     )
 
 
@@ -261,29 +270,54 @@ class LogoutHandler:
         self._token_generator = token_generator
 
     async def handle(self, command: Logout) -> None:
+        """Revokes both halves of a session independently — the refresh
+        token (always, by its hash, as before Sprint D) and, when the
+        caller's request carried a decodable access token, that specific
+        access token too (via its ``jti``, added to the denylist
+        ``get_current_claims`` checks on every subsequent request). Neither
+        half being already-revoked/missing is an error — logout is
+        idempotent either way, matching this handler's pre-Sprint-D
+        contract exactly for any client that never sends an access token.
+        """
+        changed = False
+
         refresh_repo = SqlAlchemyRefreshTokenRepository(self._session)
         token_hash = self._token_generator.hash_token(command.refresh_token)
         token = await refresh_repo.get_by_token_hash(token_hash)
+        if token is not None and token.revoked_at is None:
+            token.revoke()
+            await refresh_repo.save(token)
+            await append_event(
+                self._session,
+                aggregate_type="RefreshToken",
+                aggregate_id=str(token.id),
+                event_type=RefreshTokenRevoked.event_type,
+                payload=RefreshTokenRevoked(
+                    user_id=str(token.user_id),
+                    tenant_id=str(token.tenant_id),
+                    refresh_token_id=str(token.id),
+                    reason="logout",
+                ).payload(),
+                tenant_id=token.tenant_id.value,
+            )
+            changed = True
 
-        if token is None or token.revoked_at is not None:
-            return  # Already logged out — idempotent no-op, not an error.
+        claims = command.access_token_claims
+        if claims is not None and claims.jti and command.access_token_expires_at is not None:
+            revoked_repo = SqlAlchemyRevokedAccessTokenRepository(self._session)
+            if not await revoked_repo.is_revoked(claims.jti):
+                await revoked_repo.revoke(
+                    RevokedAccessToken.issue(
+                        jti=claims.jti,
+                        user_id=claims.user_id,
+                        tenant_id=claims.tenant_id,
+                        expires_at=command.access_token_expires_at,
+                    )
+                )
+                changed = True
 
-        token.revoke()
-        await refresh_repo.save(token)
-        await append_event(
-            self._session,
-            aggregate_type="RefreshToken",
-            aggregate_id=str(token.id),
-            event_type=RefreshTokenRevoked.event_type,
-            payload=RefreshTokenRevoked(
-                user_id=str(token.user_id),
-                tenant_id=str(token.tenant_id),
-                refresh_token_id=str(token.id),
-                reason="logout",
-            ).payload(),
-            tenant_id=token.tenant_id.value,
-        )
-        await self._session.commit()
+        if changed:
+            await self._session.commit()
 
 
 class RequestPasswordResetHandler:
@@ -351,6 +385,7 @@ class ResetPasswordHandler:
             raise UserNotFoundError(f"User {reset_token.user_id} not found")
 
         user.set_password(self._password_hasher.hash(command.new_password))
+        user.revoke_all_sessions()
         await user_repo.save(user, expected_version=user.version)
 
         reset_token.mark_used()
@@ -369,5 +404,51 @@ class ResetPasswordHandler:
             ).payload(),
             tenant_id=user.tenant_id.value,
         )
+        await append_event(
+            self._session,
+            aggregate_type="User",
+            aggregate_id=str(user.id),
+            event_type=AllSessionsRevoked.event_type,
+            payload=AllSessionsRevoked(
+                user_id=str(user.id), tenant_id=str(user.tenant_id), reason="password reset"
+            ).payload(),
+            tenant_id=user.tenant_id.value,
+        )
         await self._session.commit()
         return user
+
+
+class RevokeAllSessionsHandler:
+    """The explicit "revoke all sessions" action (Sprint D requirement) —
+    the account owner deliberately ending every one of their own active
+    sessions (e.g. "log out everywhere" after losing a device), distinct
+    from the same mechanism firing as a side effect of password reset/
+    suspend/deactivate elsewhere in this file.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def handle(self, command: RevokeAllSessions) -> None:
+        user_repo = SqlAlchemyUserRepository(self._session)
+        user = await user_repo.get_by_id(UserId.from_string(command.user_id))
+        if user is None:
+            raise UserNotFoundError(f"User {command.user_id} not found")
+
+        user.revoke_all_sessions()
+        await user_repo.save(user, expected_version=user.version)
+
+        refresh_repo = SqlAlchemyRefreshTokenRepository(self._session)
+        await refresh_repo.revoke_all_active_for_user(user.id, reason="revoke all sessions")
+
+        await append_event(
+            self._session,
+            aggregate_type="User",
+            aggregate_id=str(user.id),
+            event_type=AllSessionsRevoked.event_type,
+            payload=AllSessionsRevoked(
+                user_id=str(user.id), tenant_id=str(user.tenant_id), reason="user requested"
+            ).payload(),
+            tenant_id=user.tenant_id.value,
+        )
+        await self._session.commit()

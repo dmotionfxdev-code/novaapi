@@ -7,18 +7,19 @@ from __future__ import annotations
 
 import uuid as uuid_module
 
-from georisk.contexts.analysis.domain.entities import StageResult
+from georisk.contexts.analysis.domain.entities import RiskLayer, StageResult
 from georisk.contexts.analysis.domain.value_objects import (
     ComputationSnapshot,
     ConfidenceTier,
     HazardType,
     Indicator,
     IndicatorSet,
+    RiskLayerId,
     StageResultId,
     StageResultStatus,
     StageType,
 )
-from georisk.contexts.analysis.infrastructure.models import StageResultModel
+from georisk.contexts.analysis.infrastructure.models import RiskLayerModel, StageResultModel
 from georisk.contexts.identity.domain.value_objects import TenantId
 
 
@@ -97,3 +98,47 @@ def apply_stage_result_to_model(entity: StageResult, model: StageResultModel) ->
     model.strategy_version = entity.strategy_version
     model.formula_version = entity.formula_version
     model.schema_version = entity.schema_version
+
+
+def risk_layer_to_domain(model: RiskLayerModel) -> RiskLayer:
+    return RiskLayer(
+        id=RiskLayerId(value=model.id),
+        tenant_id=TenantId(value=model.tenant_id),
+        assessment_id=str(model.assessment_id),
+        hazard_type=HazardType(model.hazard_type),
+        stage_type=StageType(model.stage_type),
+        stage_result_id=StageResultId(value=model.stage_result_id),
+        dataset_id=model.dataset_id,
+        version=model.version,
+        geometry_type=model.geometry_type,
+        feature_count=model.feature_count,
+        bounding_box=tuple(model.bounding_box),
+        crs=model.crs,
+        risk_index=model.risk_index,
+        risk_level=model.risk_level,
+        classification=model.classification,
+        formula_version=model.formula_version,
+        geojson=model.geojson,
+        generated_at=model.generated_at,
+    )
+
+
+def apply_risk_layer_to_model(entity: RiskLayer, model: RiskLayerModel) -> None:
+    model.id = entity.id.value
+    model.tenant_id = entity.tenant_id.value
+    model.assessment_id = uuid_module.UUID(entity.assessment_id)
+    model.hazard_type = entity.hazard_type.value
+    model.stage_type = entity.stage_type.value
+    model.stage_result_id = entity.stage_result_id.value
+    model.dataset_id = entity.dataset_id
+    model.version = entity.version
+    model.geometry_type = entity.geometry_type
+    model.feature_count = entity.feature_count
+    model.bounding_box = list(entity.bounding_box)
+    model.crs = entity.crs
+    model.risk_index = entity.risk_index
+    model.risk_level = entity.risk_level
+    model.classification = entity.classification
+    model.formula_version = entity.formula_version
+    model.geojson = entity.geojson
+    model.generated_at = entity.generated_at

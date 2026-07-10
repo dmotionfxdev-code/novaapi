@@ -112,7 +112,11 @@ class RunPredictionHandler:
                 command.variable_selection_id, command.sampling_campaign_id, method.value
             )
             rows = await self._data_provider.generate_observations(
-                variables=selection.variables, sample_count=sample_count, seed=seed
+                tenant_id=command.tenant_id,
+                hazard_type=selection.hazard_type,
+                variables=selection.variables,
+                sample_count=sample_count,
+                seed=seed,
             )
 
             if method in CORRELATION_METHODS:

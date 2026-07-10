@@ -6,10 +6,13 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from georisk.contexts.analysis.domain.entities import StageResult
-from georisk.contexts.analysis.domain.errors import StageResultNotFoundError
+from georisk.contexts.analysis.domain.entities import RiskLayer, StageResult
+from georisk.contexts.analysis.domain.errors import RiskLayerNotFoundError, StageResultNotFoundError
 from georisk.contexts.analysis.domain.value_objects import StageResultId, StageType
-from georisk.contexts.analysis.infrastructure.repositories import SqlAlchemyStageResultRepository
+from georisk.contexts.analysis.infrastructure.repositories import (
+    SqlAlchemyRiskLayerRepository,
+    SqlAlchemyStageResultRepository,
+)
 from georisk.contexts.identity.domain.value_objects import TenantId
 
 
@@ -49,3 +52,25 @@ class ListStageResultsQuery:
         return await SqlAlchemyStageResultRepository(self._session).list_by_assessment(
             tenant_id, assessment_id
         )
+
+
+class GetLatestRiskLayerQuery:
+    """Sprint C — read-only, reads whatever ``RiskLayer`` the auto-generation
+    step (triggered from ``AnalysisStageExecutor`` on RISK-stage success)
+    already persisted; never generates one itself (requirement #6: "do
+    not regenerate layers on every request")."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def handle(self, tenant_id: TenantId, assessment_id: str) -> RiskLayer:
+        result = await SqlAlchemyRiskLayerRepository(self._session).get_latest(
+            tenant_id, assessment_id, StageType.RISK
+        )
+        if result is None:
+            raise RiskLayerNotFoundError(
+                f"No risk layer has been generated for assessment {assessment_id} — either "
+                "the RISK stage hasn't completed yet, or no Shapefile-sourced geometry "
+                "dataset was cataloged for this hazard type"
+            )
+        return result

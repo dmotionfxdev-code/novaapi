@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from georisk.contexts.identity.application.ports import AccessTokenClaims
 from georisk.contexts.identity.domain.value_objects import PermissionCode
-from georisk.contexts.identity.interface.dependencies import require_permission
+from georisk.contexts.identity.interface.dependencies import get_current_claims, require_permission
 from georisk.contexts.prediction.application.commands import RunPredictionCommand
 from georisk.contexts.prediction.application.handlers import RunPredictionHandler
 from georisk.contexts.prediction.application.ports import (
@@ -47,8 +47,15 @@ from georisk.contexts.prediction.interface.schemas import (
     RunPredictionRequest,
 )
 from georisk.db.session import get_session
+from georisk.rate_limiting import rate_limit_by_tenant
 
 router = APIRouter(prefix="/assessments/{assessment_id}/predictions", tags=["prediction"])
+
+
+async def _tenant_id_from_claims(
+    claims: Annotated[AccessTokenClaims, Depends(get_current_claims)],
+) -> str:
+    return str(claims.tenant_id)
 
 
 def get_variable_selection_reader(request: Request) -> VariableSelectionReader:
@@ -90,7 +97,18 @@ async def get_prediction_run(
     return PredictionRunResponse.from_domain(run)
 
 
-@router.post("/actions/run", response_model=PredictionRunResponse, status_code=201)
+@router.post(
+    "/actions/run",
+    response_model=PredictionRunResponse,
+    status_code=201,
+    dependencies=[
+        Depends(
+            rate_limit_by_tenant(
+                "prediction-execution", tenant_id_dependency=_tenant_id_from_claims
+            )
+        )
+    ],
+)
 async def run_prediction(
     assessment_id: str,
     body: RunPredictionRequest,

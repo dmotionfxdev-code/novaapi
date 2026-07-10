@@ -28,6 +28,10 @@ class StageResultId(TypedId):
     pass
 
 
+class RiskLayerId(TypedId):
+    pass
+
+
 class HazardType(StrEnum):
     """Mirrors ``contexts.assessment.domain.value_objects.HazardType``'s
     string values exactly — see this module's docstring for why it's a

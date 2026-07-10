@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import seed_firas_indicator_datasets_sync
 
 pytestmark = pytest.mark.integration
 
@@ -44,6 +45,15 @@ def _register_and_login(client: TestClient, suffix: str, role_name: str = "OWNER
     )
     assert registration.status_code == 201, registration.text
     owner_email = registration.json()["owner"]["email"]
+    # Sprint A: AnalysisStageExecutor now reads real Data Acquisition
+    # datasets (CompositionRootIndicatorInputProvider), not
+    # StubIndicatorInputProvider — seed the exact values the stub used to
+    # fabricate, as a real cataloged dataset, so a workflow started for
+    # this tenant still runs to completion (through to Validation) exactly
+    # as before.
+    seed_firas_indicator_datasets_sync(
+        os.environ["DATABASE_URL"], registration.json()["tenant"]["id"]
+    )
 
     login = client.post(
         "/api/v1/auth/token",

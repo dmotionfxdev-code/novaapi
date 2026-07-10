@@ -23,7 +23,7 @@ from georisk.contexts.data_acquisition.domain.validation import (
     validate_geojson,
     validate_geotiff,
     validate_json,
-    validate_shapefile,
+    validate_shapefile_archive,
 )
 from georisk.contexts.data_acquisition.domain.value_objects import AcquisitionFormat, DataProvider
 
@@ -91,16 +91,85 @@ def test_validate_geotiff_rejects_non_tiff_content() -> None:
     assert errors
 
 
-def test_validate_shapefile_accepts_valid_header() -> None:
-    content = b"\x00\x00\x27\x0a" + b"\x00" * 96
-    errors, metadata = validate_shapefile(content)
+def _zip_of(names: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for name, content in names.items():
+            archive.writestr(name, content)
+    return buf.getvalue()
+
+
+def test_validate_shapefile_archive_accepts_complete_archive() -> None:
+    # Sprint B: real completeness check — a well-formed ZIP naming all
+    # four required components. Content itself is irrelevant here (that's
+    # ``infrastructure/shapefile_importer.py``'s job, not this pure-domain
+    # structural check) — only file names matter.
+    content = _zip_of(
+        {
+            "parcels.shp": b"shp-bytes",
+            "parcels.shx": b"shx-bytes",
+            "parcels.dbf": b"dbf-bytes",
+            "parcels.prj": b"prj-bytes",
+        }
+    )
+    errors, metadata = validate_shapefile_archive(content)
     assert errors == []
-    assert metadata["byte_size"] == len(content)
+    assert metadata["shapefile_base_name"] == "parcels"
 
 
-def test_validate_shapefile_rejects_short_content() -> None:
-    errors, _ = validate_shapefile(b"\x00\x00\x27\x0a")
+def test_validate_shapefile_archive_rejects_not_a_zip() -> None:
+    errors, _ = validate_shapefile_archive(b"\x00\x00\x27\x0a" + b"\x00" * 96)
     assert errors
+    assert "not a valid ZIP archive" in errors[0]
+
+
+def test_validate_shapefile_archive_rejects_missing_dbf() -> None:
+    content = _zip_of({"parcels.shp": b"x", "parcels.shx": b"x", "parcels.prj": b"x"})
+    errors, _ = validate_shapefile_archive(content)
+    assert errors
+    assert "parcels.dbf" in errors[0]
+
+
+def test_validate_shapefile_archive_rejects_missing_shx() -> None:
+    content = _zip_of({"parcels.shp": b"x", "parcels.dbf": b"x", "parcels.prj": b"x"})
+    errors, _ = validate_shapefile_archive(content)
+    assert errors
+    assert "parcels.shx" in errors[0]
+
+
+def test_validate_shapefile_archive_rejects_missing_prj() -> None:
+    content = _zip_of({"parcels.shp": b"x", "parcels.shx": b"x", "parcels.dbf": b"x"})
+    errors, _ = validate_shapefile_archive(content)
+    assert errors
+    assert "parcels.prj" in errors[0]
+
+
+def test_validate_shapefile_archive_rejects_no_shp() -> None:
+    content = _zip_of({"readme.txt": b"x"})
+    errors, _ = validate_shapefile_archive(content)
+    assert errors
+    assert "no .shp file" in errors[0]
+
+
+def test_validate_shapefile_archive_rejects_multiple_shp() -> None:
+    content = _zip_of(
+        {
+            "a.shp": b"x",
+            "a.shx": b"x",
+            "a.dbf": b"x",
+            "a.prj": b"x",
+            "b.shp": b"x",
+            "b.shx": b"x",
+            "b.dbf": b"x",
+            "b.prj": b"x",
+        }
+    )
+    errors, _ = validate_shapefile_archive(content)
+    assert errors
+    assert "exactly one .shp" in errors[0]
 
 
 def test_validate_json_accepts_any_valid_json() -> None:

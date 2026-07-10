@@ -105,6 +105,9 @@ class UserModel(Base):
     # repository on every save; a save whose expected_version doesn't match
     # the current row raises OptimisticConcurrencyError.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Sprint D: bulk access-token revocation counter — see domain/entities.py
+    # User.revoke_all_sessions()'s docstring.
+    token_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     role: Mapped[RoleModel] = relationship(lazy="selectin")
 
@@ -125,6 +128,19 @@ class RefreshTokenModel(Base):
     replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey(f"{_SCHEMA}.refresh_token.id"), nullable=True
     )
+
+
+class RevokedAccessTokenModel(Base):
+    __tablename__ = "revoked_access_token"
+    __table_args__ = {"schema": _SCHEMA}
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey(f"{_SCHEMA}.user.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class PasswordResetTokenModel(Base):

@@ -74,12 +74,19 @@ class PredictionDataProvider(Protocol):
     async def generate_observations(
         self,
         *,
+        tenant_id: str,
+        hazard_type: str | None,
         variables: tuple[PredictorVariableInfo, ...],
         sample_count: int,
         seed: int,
     ) -> tuple[dict[str, float], ...]:
         """One flat ``{variable_code: value}`` dict per observation,
-        covering every variable in ``variables`` (dependent included)."""
+        covering every variable in ``variables`` (dependent included).
+        ``tenant_id``/``hazard_type`` (the confirmed ``VariableSelection``'s
+        own hazard_type, Sprint A) let a real implementation scope its
+        lookup to this tenant's own completed Analysis history for this
+        specific hazard strategy — ``StubPredictionDataProvider`` below
+        ignores both, since its synthetic rows need no such scoping."""
         ...
 
 
@@ -101,6 +108,8 @@ class StubPredictionDataProvider:
     async def generate_observations(
         self,
         *,
+        tenant_id: str,
+        hazard_type: str | None,
         variables: tuple[PredictorVariableInfo, ...],
         sample_count: int,
         seed: int,

@@ -131,6 +131,12 @@ class User:
     # Optimistic concurrency (Application Layer §9) — incremented on every
     # save; checked by the repository, not by this entity.
     version: int = field(default=0)
+    # Sprint D: bumped on every bulk session-revocation event (password
+    # reset, suspend, deactivate, explicit "revoke all sessions"). Embedded
+    # in every access token as the ``gen`` claim at issue time; a token
+    # whose claim no longer matches this counter is stale and rejected —
+    # see ``application/ports.py``'s ``AccessTokenClaims`` docstring.
+    token_generation: int = field(default=0)
 
     @classmethod
     def invite(
@@ -241,6 +247,15 @@ class User:
 
     def record_login(self) -> None:
         self.last_login_at = datetime.now(UTC)
+
+    def revoke_all_sessions(self) -> None:
+        """Bumps the counter every previously-issued access token's ``gen``
+        claim is checked against — the bulk-revocation half of Sprint D's
+        access-token revocation (the other half, single-session logout, is
+        the ``revoked_access_token`` denylist keyed by ``jti`` instead;
+        see ``domain/tokens.py``'s ``RevokedAccessToken``)."""
+        self.token_generation += 1
+        self.updated_at = datetime.now(UTC)
 
     def has_permission(self, code: PermissionCode) -> bool:
         return self.role.has_permission(code)

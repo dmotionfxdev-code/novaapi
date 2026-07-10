@@ -17,8 +17,26 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import seed_real_wildfire_hazard_observations_sync
 
 pytestmark = pytest.mark.integration
+
+# Sprint A: CompositionRootPredictionDataProvider reads real completed
+# Analysis outputs instead of StubPredictionDataProvider's on-demand
+# synthetic fabrication — these hand-picked, non-collinear observation
+# sets give correlation/MLR a real, well-conditioned design matrix to fit
+# against (ndvi and wind_speed deliberately do NOT vary in lockstep, so
+# the regression's X'X matrix isn't singular). ``wind_speed`` values are
+# deliberately in [0, 1] (not literal m/s) — this same key name is ALSO
+# WRRAS's own raw HAZARD indicator (a normalized index), whose calculator
+# validates it strictly to that range; the Prediction PredictorVariable
+# registered below with value_min/max 0/30 is metadata only, never
+# enforced at runtime, so satisfying WRRAS's real constraint is what
+# actually matters here.
+_NDVI_VALUES = [0.10, 0.22, 0.15, 0.30, 0.18, 0.35, 0.12, 0.28, 0.20, 0.33]
+_WIND_SPEED_VALUES = [0.30, 0.55, 0.80, 0.42, 0.95, 0.28, 0.71, 0.60, 0.90, 0.48]
+_BURNED_AREA_VALUES = [0.05, 0.12, 0.09, 0.18, 0.10, 0.20, 0.06, 0.16, 0.11, 0.19]
+_REAL_OBSERVATION_COUNT = len(_NDVI_VALUES)
 
 _SQUARE_GEOJSON = {
     "type": "Polygon",
@@ -40,6 +58,11 @@ def api_client():  # noqa: ANN201
 
 
 def _register_and_login(client: TestClient, suffix: str) -> dict:
+    headers, _tenant_id = _register_and_login_with_tenant(client, suffix)
+    return headers
+
+
+def _register_and_login_with_tenant(client: TestClient, suffix: str) -> tuple[dict, str]:
     registration = client.post(
         "/api/v1/tenants",
         json={
@@ -50,6 +73,7 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         },
     )
     assert registration.status_code == 201, registration.text
+    tenant_id = registration.json()["tenant"]["id"]
     owner_email = registration.json()["owner"]["email"]
 
     login = client.post(
@@ -57,7 +81,20 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         json={"email": owner_email, "password": "correct-horse-battery-staple"},
     )
     assert login.status_code == 200, login.text
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    return headers, tenant_id
+
+
+def _seed_real_observations(tenant_id: str) -> None:
+    observations = [
+        {"ndvi": ndvi, "wind_speed": wind, "burned_area": burned}
+        for ndvi, wind, burned in zip(
+            _NDVI_VALUES, _WIND_SPEED_VALUES, _BURNED_AREA_VALUES, strict=True
+        )
+    ]
+    seed_real_wildfire_hazard_observations_sync(
+        os.environ["DATABASE_URL"], tenant_id, observations
+    )
 
 
 def _build_prediction_ready_assessment(client: TestClient, headers: dict) -> dict:
@@ -193,7 +230,8 @@ def test_run_correlation_prediction_via_http(
     api_client: TestClient, method: str, expected_formula_version: str
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
-    headers = _register_and_login(api_client, suffix)
+    headers, tenant_id = _register_and_login_with_tenant(api_client, suffix)
+    _seed_real_observations(tenant_id)
     ctx = _build_prediction_ready_assessment(api_client, headers)
 
     run = api_client.post(
@@ -213,12 +251,13 @@ def test_run_correlation_prediction_via_http(
     # 3 variables (ndvi, wind_speed, burned_area) -> 3 unordered pairs.
     assert len(body["correlation_pairs"]) == 3
     assert body["model_metadata"]["formula_version"] == expected_formula_version
-    assert body["model_metadata"]["sample_size"] == 1000
+    assert body["model_metadata"]["sample_size"] == _REAL_OBSERVATION_COUNT
 
 
 def test_run_mlr_prediction_via_http(api_client: TestClient) -> None:
     suffix = uuid.uuid4().hex[:8]
-    headers = _register_and_login(api_client, suffix)
+    headers, tenant_id = _register_and_login_with_tenant(api_client, suffix)
+    _seed_real_observations(tenant_id)
     ctx = _build_prediction_ready_assessment(api_client, headers)
 
     run = api_client.post(

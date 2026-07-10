@@ -11,6 +11,7 @@ from georisk.contexts.identity.domain.tokens import (
     InvitationToken,
     PasswordResetToken,
     RefreshToken,
+    RevokedAccessToken,
 )
 from georisk.contexts.identity.domain.value_objects import (
     Branding,
@@ -29,6 +30,7 @@ from georisk.contexts.identity.infrastructure.models import (
     InvitationTokenModel,
     PasswordResetTokenModel,
     RefreshTokenModel,
+    RevokedAccessTokenModel,
     RoleModel,
     TenantModel,
     UserModel,
@@ -82,6 +84,7 @@ def user_to_domain(model: UserModel) -> User:
         updated_at=model.updated_at,
         last_login_at=model.last_login_at,
         version=model.version,
+        token_generation=model.token_generation,
     )
 
 
@@ -95,6 +98,7 @@ def apply_user_to_model(entity: User, model: UserModel) -> None:
     model.created_at = entity.created_at
     model.updated_at = entity.updated_at
     model.last_login_at = entity.last_login_at
+    model.token_generation = entity.token_generation
 
 
 def refresh_token_to_domain(model: RefreshTokenModel) -> RefreshToken:
@@ -119,6 +123,26 @@ def apply_refresh_token_to_model(entity: RefreshToken, model: RefreshTokenModel)
     model.expires_at = entity.expires_at
     model.revoked_at = entity.revoked_at
     model.replaced_by_id = entity.replaced_by_id.value if entity.replaced_by_id else None
+
+
+def revoked_access_token_to_domain(model: RevokedAccessTokenModel) -> RevokedAccessToken:
+    return RevokedAccessToken(
+        jti=model.jti,
+        user_id=UserId(value=model.user_id),
+        tenant_id=TenantId(value=model.tenant_id),
+        revoked_at=model.revoked_at,
+        expires_at=model.expires_at,
+    )
+
+
+def apply_revoked_access_token_to_model(
+    entity: RevokedAccessToken, model: RevokedAccessTokenModel
+) -> None:
+    model.jti = entity.jti
+    model.user_id = entity.user_id.value
+    model.tenant_id = entity.tenant_id.value
+    model.revoked_at = entity.revoked_at
+    model.expires_at = entity.expires_at
 
 
 def password_reset_token_to_domain(model: PasswordResetTokenModel) -> PasswordResetToken:

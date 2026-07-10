@@ -101,6 +101,39 @@ class PasswordResetToken:
 
 
 @dataclass(slots=True)
+class RevokedAccessToken:
+    """A single-session logout denylist entry (Sprint D), keyed by the
+    JWT's own ``jti`` — deliberately NOT the same mechanism as ``User.
+    token_generation``'s bulk revocation (password reset/suspend/
+    deactivate/"revoke all sessions"), since logout must end only the
+    caller's current session, never every session for that user.
+
+    ``expires_at`` mirrors the original access token's own expiry (not a
+    TTL on this row) purely as bookkeeping for a future pruning job — this
+    row is authoritative for revocation regardless of whether that
+    timestamp has passed; nothing prunes it automatically yet.
+    """
+
+    jti: str
+    user_id: UserId
+    tenant_id: TenantId
+    revoked_at: datetime
+    expires_at: datetime
+
+    @classmethod
+    def issue(
+        cls, *, jti: str, user_id: UserId, tenant_id: TenantId, expires_at: datetime
+    ) -> RevokedAccessToken:
+        return cls(
+            jti=jti,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            revoked_at=datetime.now(UTC),
+            expires_at=expires_at,
+        )
+
+
+@dataclass(slots=True)
 class InvitationToken:
     id: InvitationTokenId
     user_id: UserId

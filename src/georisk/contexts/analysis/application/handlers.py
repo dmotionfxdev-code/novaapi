@@ -25,20 +25,33 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from georisk.contexts.analysis.application.commands import RecordStageResultCommand
+from georisk.contexts.analysis.application.commands import (
+    GenerateRiskLayerCommand,
+    RecordStageResultCommand,
+)
 from georisk.contexts.analysis.application.ports import IndicatorInputProvider
 from georisk.contexts.analysis.application.strategy_registry import StrategyRegistry
-from georisk.contexts.analysis.domain.entities import StageResult
-from georisk.contexts.analysis.domain.errors import InvalidIndicatorInputError
+from georisk.contexts.analysis.domain.entities import RiskLayer, StageResult
+from georisk.contexts.analysis.domain.errors import (
+    InvalidIndicatorInputError,
+    RiskLayerGenerationError,
+    StageResultNotFoundError,
+)
 from georisk.contexts.analysis.domain.events import StageResultComputed, StageResultFailed
 from georisk.contexts.analysis.domain.strategy import HazardStrategy, StageCalculator
 from georisk.contexts.analysis.domain.value_objects import (
     ComputationSnapshot,
     HazardType,
+    StageResultId,
+    StageResultStatus,
     StageType,
     confidence_tier_for_sample_size,
 )
-from georisk.contexts.analysis.infrastructure.repositories import SqlAlchemyStageResultRepository
+from georisk.contexts.analysis.infrastructure.repositories import (
+    SqlAlchemyRiskLayerRepository,
+    SqlAlchemyStageResultRepository,
+)
+from georisk.contexts.analysis.infrastructure.risk_layer_generator import build_risk_layer
 from georisk.contexts.identity.domain.value_objects import TenantId
 from georisk.db.outbox_writer import append_event
 
@@ -183,3 +196,101 @@ class RecordStageResultHandler:
                 f"{stage_type.value.title()} requires completed {_join_with_and(labels)} results"
             )
         return inputs
+
+
+class GenerateRiskLayerHandler:
+    """Sprint C — one transaction, one aggregate (``RiskLayer``), same
+    shape as ``RecordStageResultHandler`` above. Never imports
+    ``contexts.data_acquisition`` — ``command.features``/``geometry_type``/
+    ``crs`` arrive already resolved (the composition root,
+    ``api/risk_layer_ports.py``, is the only code allowed to read Data
+    Acquisition's real Shapefile-sourced geometries). This handler's own
+    job is narrow: load the target ``StageResult``, hand its real
+    computed values to the business-formula-free
+    ``risk_layer_generator``, persist the result.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._stage_result_repo = SqlAlchemyStageResultRepository(session)
+        self._risk_layer_repo = SqlAlchemyRiskLayerRepository(session)
+
+    async def handle(self, command: GenerateRiskLayerCommand) -> RiskLayer:
+        tenant_id = TenantId.from_string(command.tenant_id)
+        stage_result = await self._stage_result_repo.get_by_id(
+            StageResultId.from_string(command.stage_result_id)
+        )
+        if stage_result is None or stage_result.tenant_id != tenant_id:
+            raise StageResultNotFoundError(f"StageResult {command.stage_result_id} not found")
+        if stage_result.stage_type is not StageType.RISK:
+            raise RiskLayerGenerationError(
+                f"Risk layers are only generated from the RISK stage, not "
+                f"{stage_result.stage_type.value}"
+            )
+        if stage_result.status is not StageResultStatus.COMPLETE or stage_result.indicators is None:
+            raise RiskLayerGenerationError(
+                f"StageResult {command.stage_result_id} is not a COMPLETE result with indicators"
+            )
+        if not stage_result.indicators.indicators:
+            raise RiskLayerGenerationError(
+                f"StageResult {command.stage_result_id} has no indicators to derive a risk "
+                f"index from"
+            )
+        if stage_result.formula_version is None:
+            raise RiskLayerGenerationError(
+                f"StageResult {command.stage_result_id} has no recorded formula_version"
+            )
+
+        # The RISK stage's own calculator always produces exactly one
+        # risk-index indicator (confirmed against both FIRAS's and
+        # WRRAS's risk.py) — read generically, by position, never by a
+        # hardcoded hazard-specific code name (e.g. "flood_risk_index"),
+        # so this handler never needs to know which hazard strategy ran.
+        risk_index = stage_result.indicators.indicators[0].value
+        hazard_specific_attributes = stage_result.indicators.as_dict()
+
+        version = await self._risk_layer_repo.next_version(
+            tenant_id, command.assessment_id, stage_result.stage_type
+        )
+        built = build_risk_layer(
+            features=command.features,
+            assessment_id=command.assessment_id,
+            hazard_type=stage_result.hazard_type.value,
+            stage_type=stage_result.stage_type.value,
+            dataset_id=command.dataset_id,
+            geometry_type=command.geometry_type,
+            risk_index=risk_index,
+            analysis_timestamp=stage_result.created_at,
+            formula_version=stage_result.formula_version,
+            hazard_specific_attributes=hazard_specific_attributes,
+        )
+
+        layer, event = RiskLayer.generate(
+            tenant_id=tenant_id,
+            assessment_id=command.assessment_id,
+            hazard_type=stage_result.hazard_type,
+            stage_type=stage_result.stage_type,
+            stage_result_id=stage_result.id,
+            dataset_id=command.dataset_id,
+            version=version,
+            geometry_type=built.geometry_type,
+            feature_count=built.feature_count,
+            bounding_box=built.bounding_box,
+            crs=command.crs,
+            risk_index=built.risk_index,
+            risk_level=built.risk_level,
+            classification=built.classification,
+            formula_version=stage_result.formula_version,
+            geojson=built.geojson,
+        )
+        await self._risk_layer_repo.save(layer)
+        await append_event(
+            self._session,
+            aggregate_type="RiskLayer",
+            aggregate_id=str(layer.id),
+            event_type=event.event_type,
+            payload=event.payload(),
+            tenant_id=tenant_id.value,
+        )
+        await self._session.commit()
+        return layer

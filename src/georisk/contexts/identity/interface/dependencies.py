@@ -9,6 +9,7 @@ context and never itself authorizes anything (Implementation Bootstrap §3).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -24,7 +25,10 @@ from georisk.contexts.identity.application.ports import (
 from georisk.contexts.identity.domain.entities import User
 from georisk.contexts.identity.domain.errors import UserNotActiveError, UserNotFoundError
 from georisk.contexts.identity.domain.value_objects import PermissionCode
-from georisk.contexts.identity.infrastructure.repositories import SqlAlchemyUserRepository
+from georisk.contexts.identity.infrastructure.repositories import (
+    SqlAlchemyRevokedAccessTokenRepository,
+    SqlAlchemyUserRepository,
+)
 from georisk.contexts.identity.infrastructure.security import (
     Argon2PasswordHasherAdapter,
     JwtAccessTokenIssuer,
@@ -32,9 +36,15 @@ from georisk.contexts.identity.infrastructure.security import (
 )
 from georisk.db.session import Database, get_session
 from georisk.settings import Settings, get_settings
-from georisk.shared_kernel.errors import AuthorizationDeniedError
+from georisk.shared_kernel.errors import AuthenticationFailedError, AuthorizationDeniedError
 
 _bearer_scheme = HTTPBearer(auto_error=True)
+# Sprint D: logout must keep working for a caller that sends no
+# ``Authorization`` header at all (pre-Sprint-D API contract, still
+# covered by ``test_identity_api.py``'s idempotent-logout assertions) —
+# ``auto_error=False`` makes the credentials optional instead of a hard
+# 403 when absent.
+_optional_bearer_scheme = HTTPBearer(auto_error=False)
 
 # Stateless, cheap to construct — no need to cache beyond module import.
 _password_hasher = Argon2PasswordHasherAdapter()
@@ -66,24 +76,82 @@ def get_database(request: Request) -> Database:
     return request.app.state.db
 
 
+async def get_optional_decoded_access_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_optional_bearer_scheme)],
+    access_token_issuer: Annotated[AccessTokenIssuer, Depends(get_access_token_issuer)],
+) -> tuple[AccessTokenClaims, datetime] | None:
+    """Best-effort decode for logout only — a missing, malformed, or
+    already-expired access token is not an error here (the refresh-token
+    revocation half of logout must still proceed independently; see
+    ``routes_auth.py``'s ``logout``), mirroring the same best-effort
+    posture ``TenantContextMiddleware`` already uses for the same header.
+    """
+    if credentials is None:
+        return None
+    try:
+        claims = access_token_issuer.decode(credentials.credentials)
+        expires_at = access_token_issuer.decode_expiry(credentials.credentials)
+    except Exception:  # noqa: BLE001 — best-effort only, see docstring above
+        return None
+    return claims, expires_at
+
+
 async def get_current_claims(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer_scheme)],
     access_token_issuer: Annotated[AccessTokenIssuer, Depends(get_access_token_issuer)],
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AccessTokenClaims:
-    return access_token_issuer.decode(credentials.credentials)
+    """The single dependency every authenticated route sits on top of
+    (directly via ``get_current_user``, or indirectly via
+    ``require_permission``) — Sprint D added a genuine revocation check
+    here so BOTH paths reject a revoked token identically, closing a real
+    gap: ``require_permission`` previously trusted the JWT's embedded
+    claims alone and never re-checked the database at all, so a suspended/
+    deactivated user — or an explicitly revoked session — stayed fully
+    authorized on any permission-only route until their access token's
+    natural 8h expiry. That staleness was an accepted tradeoff for
+    *permissions* (a role change taking up to 8h to propagate); it was
+    never an accepted tradeoff for *revocation*, which this closes
+    unconditionally, at the cost of one extra user lookup per request that
+    ``get_current_user`` would already be paying — cached below on
+    ``request.state`` so it doesn't pay it twice in the same request.
+    """
+    claims = access_token_issuer.decode(credentials.credentials)
+
+    revoked_repo = SqlAlchemyRevokedAccessTokenRepository(session)
+    if claims.jti and await revoked_repo.is_revoked(claims.jti):
+        raise AuthenticationFailedError("This session has been logged out")
+
+    user_repo = SqlAlchemyUserRepository(session)
+    user = await user_repo.get_by_id(claims.user_id)
+    if user is None:
+        raise UserNotFoundError(f"User {claims.user_id} not found")
+    if not user.is_login_eligible():
+        raise UserNotActiveError("This account is no longer active")
+    if user.token_generation != claims.token_generation:
+        raise AuthenticationFailedError(
+            "This session has been revoked — please log in again"
+        )
+
+    request.state.current_user = user
+    return claims
 
 
 async def get_current_user(
+    request: Request,
     claims: Annotated[AccessTokenClaims, Depends(get_current_claims)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> User:
-    """Re-reads the user from the database on every request rather than
-    trusting the JWT's identity claim alone — a status change (suspended,
-    deactivated) since token issuance must take effect immediately for
-    authentication, even though the *permission* claims embedded in the
-    token itself are allowed to be up to 8h stale (module docstring
-    tradeoff noted in application/ports.py).
+    """Returns the same ``User`` row ``get_current_claims`` already fetched
+    for its revocation/active-status check (cached on ``request.state`` —
+    same request, same session, no staleness risk) instead of querying
+    twice.
     """
+    cached = getattr(request.state, "current_user", None)
+    if cached is not None:
+        return cached
+
     user_repo = SqlAlchemyUserRepository(session)
     user = await user_repo.get_by_id(claims.user_id)
     if user is None:

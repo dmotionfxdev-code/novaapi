@@ -41,6 +41,7 @@ certifi==2026.6.17
     # via
     #   httpcore
     #   httpx
+    #   pyogrio
     #   requests
 cffi==2.0.0
     # via
@@ -186,6 +187,10 @@ mypy-extensions==1.1.0
     # via mypy
 nodeenv==1.10.0
     # via pre-commit
+numpy==2.2.6
+    # via
+    #   pyogrio
+    #   shapely
 opentelemetry-api==1.29.0
     # via
     #   georisk (pyproject.toml)
@@ -234,6 +239,7 @@ packaging==26.2
     #   opentelemetry-instrumentation
     #   pip-audit
     #   pip-requirements-parser
+    #   pyogrio
     #   pytest
 pip-api==0.0.34
     # via pip-audit
@@ -280,10 +286,14 @@ pygments==2.20.0
     # via rich
 pyjwt==2.10.1
     # via georisk (pyproject.toml)
+pyogrio==0.13.0
+    # via georisk (pyproject.toml)
 pyparsing==3.3.2
     # via
     #   httplib2
     #   pip-requirements-parser
+pyshp==3.1.4
+    # via georisk (pyproject.toml)
 pytest==8.3.4
     # via
     #   georisk (pyproject.toml)
@@ -321,6 +331,8 @@ requests==2.34.2
 rich==15.0.0
     # via pip-audit
 ruff==0.8.4
+    # via georisk (pyproject.toml)
+shapely==2.1.2
     # via georisk (pyproject.toml)
 six==1.17.0
     # via

@@ -19,6 +19,8 @@ whatever transaction is currently open on the caller's session.
 
 from __future__ import annotations
 
+from georisk.contexts.analysis.domain.value_objects import HazardType as AnalysisHazardType
+from georisk.contexts.analysis.infrastructure.repositories import SqlAlchemyStageResultRepository
 from georisk.contexts.data_acquisition.domain.value_objects import VariableSelectionId
 from georisk.contexts.data_acquisition.infrastructure.repositories import (
     SqlAlchemyPredictorVariableRepository,
@@ -31,11 +33,18 @@ from georisk.contexts.geospatial.domain.value_objects import (
 from georisk.contexts.geospatial.infrastructure.repositories import (
     SqlAlchemySamplingCampaignRepository,
 )
+from georisk.contexts.identity.domain.value_objects import TenantId
 from georisk.contexts.prediction.application.ports import (
     PredictorVariableInfo,
     VariableSelectionInfo,
 )
 from georisk.db.session import Database
+
+
+class MissingHazardTypeError(ValueError):
+    """A confirmed ``VariableSelection`` has no ``hazard_type`` set, so
+    there is no specific hazard strategy's completed Analysis history to
+    read real observations from."""
 
 
 class CompositionRootVariableSelectionReader:
@@ -100,3 +109,50 @@ class CompositionRootSamplingCampaignReader:
             if campaign.status is not SamplingCampaignStatus.GENERATED:
                 return None
             return len(campaign.sample_points)
+
+
+class CompositionRootPredictionDataProvider:
+    """Implements Prediction's ``PredictionDataProvider`` port using the
+    Analysis Engine's real completed ``StageResult`` history — Sprint A's
+    replacement for ``StubPredictionDataProvider``. Every returned row is
+    one real assessment's merged indicator values (across all of that
+    assessment's COMPLETE stages for this ``hazard_type``, via
+    ``StageResultRepository.list_all_indicators_by_assessment``), never a
+    fabricated one: an assessment missing any of the requested variable
+    codes is simply excluded from the result rather than padded with a
+    guessed value."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def generate_observations(
+        self,
+        *,
+        tenant_id: str,
+        hazard_type: str | None,
+        variables: tuple[PredictorVariableInfo, ...],
+        sample_count: int,
+        seed: int,
+    ) -> tuple[dict[str, float], ...]:
+        if hazard_type is None:
+            raise MissingHazardTypeError(
+                "Cannot resolve real Analysis outputs for a VariableSelection with no "
+                "hazard_type — real observations are read from one specific hazard "
+                "strategy's completed StageResults."
+            )
+
+        async with self._db.session() as session:
+            repo = SqlAlchemyStageResultRepository(session)
+            rows = await repo.list_all_indicators_by_assessment(
+                TenantId.from_string(tenant_id),
+                AnalysisHazardType(hazard_type),
+                limit=sample_count,
+            )
+
+        codes = [variable.code for variable in variables]
+        observations = tuple(
+            {code: row[code] for code in codes}
+            for row in rows
+            if all(code in row and isinstance(row[code], int | float) for code in codes)
+        )
+        return observations[:sample_count]

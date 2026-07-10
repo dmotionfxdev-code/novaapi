@@ -156,3 +156,10 @@ class AcquisitionJobModel(Base):
     applied_preprocessing: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     extracted_features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     skipped_features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # --- Sprint B: real ESRI Shapefile ingestion ---
+    shapefile_geometry_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    shapefile_feature_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shapefile_bounding_box: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    shapefile_crs: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    shapefile_attributes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

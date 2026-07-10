@@ -197,3 +197,19 @@ class RefreshTokenRevoked:
 
     def payload(self) -> dict:
         return {k: v for k, v in asdict(self).items() if k != "event_type"}
+
+
+@dataclass(frozen=True, slots=True)
+class AllSessionsRevoked:
+    """Sprint D — the explicit "revoke all sessions" action, and the same
+    bulk-revocation moment triggered internally by password reset, suspend,
+    and deactivate (each of those raises this in addition to their own
+    existing event, e.g. ``PasswordResetCompleted``/``UserStatusChanged``)."""
+
+    event_type: ClassVar[str] = "identity.AllSessionsRevoked"
+    user_id: str
+    tenant_id: str
+    reason: str
+
+    def payload(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if k != "event_type"}

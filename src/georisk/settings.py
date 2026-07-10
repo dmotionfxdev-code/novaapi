@@ -56,6 +56,22 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str | None = None
     otel_service_name: str = "georisk-api"
 
+    # Sprint D — application-layer rate limiting (api/middleware/
+    # rate_limiting.py), finally consuming ``redis_ratelimit_url`` above
+    # (declared since Sprint 0, unused until now). Redis-backed when
+    # reachable, falling back to an in-process counter otherwise — see
+    # that module's docstring. Defaults are generous enough not to
+    # interfere with normal use while still bounding brute-force/abuse;
+    # tests override these to a much smaller number for fast,
+    # deterministic rate-limit assertions.
+    rate_limit_login_per_minute: int = 10
+    rate_limit_registration_per_hour: int = 5
+    rate_limit_password_reset_per_hour: int = 5
+    rate_limit_token_refresh_per_minute: int = 30
+    rate_limit_analysis_execution_per_minute: int = 20
+    rate_limit_prediction_execution_per_minute: int = 20
+    rate_limit_upload_per_minute: int = 20
+
     # Identity context (Roadmap Sprint 1). The default below is explicitly
     # a development-only placeholder — production deployments MUST inject a
     # unique, high-entropy secret via the platform's secrets manager

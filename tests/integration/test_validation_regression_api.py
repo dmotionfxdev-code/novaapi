@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import seed_real_wildfire_hazard_observations_sync
 
 pytestmark = pytest.mark.integration
 
@@ -25,6 +26,15 @@ _SQUARE_GEOJSON = {
     "type": "Polygon",
     "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
 }
+
+# Sprint A: CompositionRootPredictionDataProvider reads real completed
+# Analysis outputs instead of StubPredictionDataProvider's on-demand
+# synthetic fabrication — see test_prediction_api.py for why these exact
+# values (non-collinear predictors, wind_speed in [0, 1] since it's also
+# WRRAS's own raw HAZARD indicator key).
+_NDVI_VALUES = [0.10, 0.22, 0.15, 0.30, 0.18, 0.35, 0.12, 0.28, 0.20, 0.33]
+_WIND_SPEED_VALUES = [0.30, 0.55, 0.80, 0.42, 0.95, 0.28, 0.71, 0.60, 0.90, 0.48]
+_BURNED_AREA_VALUES = [0.05, 0.12, 0.09, 0.18, 0.10, 0.20, 0.06, 0.16, 0.11, 0.19]
 
 
 @pytest.fixture
@@ -53,6 +63,19 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
     )
     assert registration.status_code == 201, registration.text
     owner_email = registration.json()["owner"]["email"]
+    tenant_id = registration.json()["tenant"]["id"]
+    # Sprint A: real completed Analysis outputs, sharing the exact
+    # variable codes _build_prediction_run registers below, so
+    # CompositionRootPredictionDataProvider has real rows to read.
+    observations = [
+        {"ndvi": ndvi, "wind_speed": wind, "burned_area": burned}
+        for ndvi, wind, burned in zip(
+            _NDVI_VALUES, _WIND_SPEED_VALUES, _BURNED_AREA_VALUES, strict=True
+        )
+    ]
+    seed_real_wildfire_hazard_observations_sync(
+        os.environ["DATABASE_URL"], tenant_id, observations
+    )
 
     login = client.post(
         "/api/v1/auth/token",

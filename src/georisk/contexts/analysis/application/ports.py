@@ -32,6 +32,28 @@ class IndicatorInputProvider(Protocol):
     ) -> dict: ...
 
 
+class RiskLayerGenerationPort(Protocol):
+    """Sprint C — the seam ``AnalysisStageExecutor`` calls after a
+    successful RISK-stage completion to (best-effort) produce a real
+    spatial ``RiskLayer``. Implemented by the composition-root
+    ``CompositionRootRiskLayerService`` (``api/risk_layer_ports.py``),
+    since resolving a genuine Shapefile-sourced geometry dataset requires
+    reading Data Acquisition — a peer context ``contexts.analysis`` may
+    not import directly. A missing/non-Shapefile geometry source is an
+    expected, benign outcome (no layer generated), never surfaced as an
+    exception from this port — see that module's own docstring."""
+
+    async def generate_if_possible(
+        self,
+        *,
+        tenant_id: str,
+        assessment_id: str,
+        hazard_type: str,
+        stage_result_id: str,
+        issued_by: str,
+    ) -> None: ...
+
+
 class StubIndicatorInputProvider:
     """Fixed, physically-plausible dummy values per hazard type's leaf
     stage — not a single "always perfect" dataset, so the ported formulas'

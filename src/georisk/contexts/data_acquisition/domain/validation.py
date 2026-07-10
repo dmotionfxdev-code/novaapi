@@ -3,13 +3,26 @@ Metadata validation, Geometry validation." Deliberately fresh, pure-
 Python, no-heavy-dependency structural validators — NOT a reuse of
 ``contexts.geospatial``'s ``Geometry`` class, since the peer-independence
 contract forbids Data Acquisition from importing another context's
-internals, and a full GIS-library-backed validator (shapely/rasterio/
-fiona) is exactly the "hazard-specific dependency lands with the sprint
-that needs it" tradeoff this platform has deferred since Sprint 0 — these
-functions validate *structure* (is this well-formed GeoJSON/CSV/GeoTIFF/
-Shapefile/JSON, does it declare a usable CRS), not full geometric
-correctness (self-intersection, ring winding, etc.), which is out of
-scope for what Sprint 13 actually asked for.
+internals. These functions validate *structure* (is this well-formed
+GeoJSON/CSV/GeoTIFF/JSON, does it declare a usable CRS), not full
+geometric correctness — genuine GIS-library-backed parsing lives in
+``infrastructure/shapefile_importer.py`` instead (Sprint B), since the
+domain layer may never import a third-party GIS library (import-linter's
+"External GIS/GEE libraries only imported behind data_acquisition's
+infrastructure layer" contract) — the same reason
+``infrastructure/gee_connector.py`` exists as a separate module rather
+than living here.
+
+Sprint B replaced ``validate_shapefile``'s original magic-byte-only check
+(``content[:4] == b"\\x00\\x00\\x27\\x0a"``) with
+``validate_shapefile_archive`` below: a genuine ZIP-completeness check
+(is this a valid ZIP, does it contain exactly one ``.shp`` plus its
+required ``.shx``/``.dbf``/``.prj`` companions) using only the stdlib
+``zipfile`` module — still pure domain logic, no GIS library needed for
+*this* check, since completeness is a question about file *names*, not
+content. The actual geometry/attribute/CRS parsing this ZIP's contents
+undergo happens afterward, in the infrastructure layer, orchestrated by
+``ExecuteAcquisitionJobHandler`` (application layer) — never here.
 """
 
 from __future__ import annotations
@@ -18,11 +31,18 @@ import csv
 import io
 import json
 import re
+import zipfile
 from dataclasses import dataclass
 
 from georisk.contexts.data_acquisition.domain.value_objects import AcquisitionFormat
 
 _EPSG_PATTERN = re.compile(r"^EPSG:\d+$")
+
+#: The four components every complete ESRI Shapefile dataset must have
+#: (Sprint B requirement #2) — ``.shp`` (geometry), ``.shx`` (index),
+#: ``.dbf`` (attributes), ``.prj`` (CRS, well-known-text). Others
+#: (``.cpg``, ``.sbn``, ``.xml``, ...) may be present but are optional.
+_REQUIRED_SHAPEFILE_EXTENSIONS = (".shp", ".shx", ".dbf", ".prj")
 
 #: A valid top-level GeoJSON ``type`` (RFC 7946 §1.4).
 _GEOJSON_TYPES = frozenset(
@@ -41,9 +61,6 @@ _GEOJSON_TYPES = frozenset(
 
 # TIFF magic bytes: little-endian ("II*\x00") or big-endian ("MM\x00*").
 _TIFF_MAGIC = (b"II*\x00", b"MM\x00*")
-
-# Shapefile (.shp) file code 9994, big-endian, per the ESRI Shapefile spec.
-_SHAPEFILE_MAGIC = b"\x00\x00\x27\x0a"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +124,48 @@ def validate_geotiff(content: bytes) -> tuple[list[str], dict[str, object]]:
     return [], {"byte_size": len(content)}
 
 
-def validate_shapefile(content: bytes) -> tuple[list[str], dict[str, object]]:
-    if len(content) < 100 or content[:4] != _SHAPEFILE_MAGIC:
-        return ["Content does not start with a valid Shapefile (.shp) header"], {}
-    return [], {"byte_size": len(content)}
+def validate_shapefile_archive(content: bytes) -> tuple[list[str], dict[str, object]]:
+    """Requirement #2's completeness check: a Shapefile upload is a ZIP
+    archive (Sprint B — a single ``.shp`` file's bytes alone can never be
+    "a Shapefile dataset," which is always multi-file by format
+    definition). Checks only file NAMES inside the archive — genuine
+    geometry/attribute/CRS parsing happens later, in
+    ``infrastructure/shapefile_importer.py``, once this structural
+    precondition holds.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = archive.namelist()
+    except zipfile.BadZipFile:
+        return ["Content is not a valid ZIP archive"], {}
+
+    # Case-insensitive, ignoring any directory prefix a zip entry might
+    # carry (e.g. "data/parcels.shp") — the "base name" is everything
+    # before the last dot of the .shp entry's own filename.
+    shp_entries = [n for n in names if n.lower().endswith(".shp")]
+    if not shp_entries:
+        return ["ZIP archive contains no .shp file"], {}
+    if len(shp_entries) > 1:
+        return [
+            f"ZIP archive must contain exactly one .shp dataset, found {len(shp_entries)}: "
+            f"{', '.join(shp_entries)}"
+        ], {}
+
+    shp_entry = shp_entries[0]
+    base_name = shp_entry[: -len(".shp")]
+    lower_names = {n.lower() for n in names}
+    missing = [
+        f"{base_name}{ext}"
+        for ext in _REQUIRED_SHAPEFILE_EXTENSIONS
+        if ext != ".shp" and (base_name.lower() + ext) not in lower_names
+    ]
+    if missing:
+        return [
+            f"Incomplete Shapefile dataset — missing required component(s): "
+            f"{', '.join(missing)}"
+        ], {}
+
+    return [], {"shapefile_base_name": base_name, "archive_entries": tuple(names)}
 
 
 def validate_json(content: bytes) -> tuple[list[str], dict[str, object]]:
@@ -125,7 +180,7 @@ _VALIDATORS_BY_FORMAT = {
     AcquisitionFormat.GEOJSON: validate_geojson,
     AcquisitionFormat.CSV: validate_csv,
     AcquisitionFormat.GEOTIFF: validate_geotiff,
-    AcquisitionFormat.SHAPEFILE: validate_shapefile,
+    AcquisitionFormat.SHAPEFILE: validate_shapefile_archive,
     AcquisitionFormat.JSON: validate_json,
 }
 

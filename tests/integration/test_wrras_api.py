@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import seed_wrras_indicator_datasets_sync
 
 pytestmark = pytest.mark.integration
 
@@ -51,7 +52,16 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         json={"email": owner_email, "password": "correct-horse-battery-staple"},
     )
     assert login.status_code == 200, login.text
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    # Sprint A: AnalysisStageExecutor now reads real Data Acquisition
+    # datasets (CompositionRootIndicatorInputProvider), not
+    # StubIndicatorInputProvider — seed the exact values the stub used to
+    # fabricate, as a real cataloged dataset, so every test in this file
+    # that drives a WRRAS workflow to completion still sees the same
+    # numbers it always asserted on.
+    tenant_id = registration.json()["tenant"]["id"]
+    seed_wrras_indicator_datasets_sync(os.environ["DATABASE_URL"], tenant_id)
+    return headers
 
 
 def _create_and_publish_wrras_template(client: TestClient, headers: dict, suffix: str) -> str:

@@ -61,10 +61,17 @@ from georisk.contexts.assessment.interface.workflow_schemas import (
 )
 from georisk.contexts.identity.application.ports import AccessTokenClaims
 from georisk.contexts.identity.domain.value_objects import PermissionCode
-from georisk.contexts.identity.interface.dependencies import require_permission
+from georisk.contexts.identity.interface.dependencies import get_current_claims, require_permission
 from georisk.db.session import Database, get_database, get_session
+from georisk.rate_limiting import rate_limit_by_tenant
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
+
+
+async def _tenant_id_from_claims(
+    claims: Annotated[AccessTokenClaims, Depends(get_current_claims)],
+) -> str:
+    return str(claims.tenant_id)
 
 
 def get_stage_executor(request: Request) -> StageExecutor:
@@ -264,7 +271,17 @@ async def cancel_assessment(
 # is a pure read and stays on the ordinary per-request session.
 
 
-@router.post("/{assessment_id}/actions/start-workflow", response_model=AssessmentResponse)
+@router.post(
+    "/{assessment_id}/actions/start-workflow",
+    response_model=AssessmentResponse,
+    dependencies=[
+        Depends(
+            rate_limit_by_tenant(
+                "analysis-execution", tenant_id_dependency=_tenant_id_from_claims
+            )
+        )
+    ],
+)
 async def start_workflow(
     assessment_id: str,
     body: StartWorkflowRequest,
@@ -291,6 +308,13 @@ async def start_workflow(
 @router.post(
     "/{assessment_id}/stages/{stage_type}/actions/execute",
     response_model=AssessmentWorkflowResponse,
+    dependencies=[
+        Depends(
+            rate_limit_by_tenant(
+                "analysis-execution", tenant_id_dependency=_tenant_id_from_claims
+            )
+        )
+    ],
 )
 async def execute_stage_manually(
     assessment_id: str,

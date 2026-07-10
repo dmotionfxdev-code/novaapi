@@ -19,11 +19,17 @@ from georisk.contexts.identity.interface.schemas import (
     UserResponse,
 )
 from georisk.db.session import Database
+from georisk.rate_limiting import rate_limit_by_ip
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
 
-@router.post("", response_model=RegisterTenantResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=RegisterTenantResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_ip("registration"))],
+)
 async def register_tenant(
     body: RegisterTenantRequest,
     db: Annotated[Database, Depends(get_database)],

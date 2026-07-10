@@ -309,6 +309,11 @@ class AcquisitionJobResponse(BaseModel):
     applied_preprocessing: list[str]
     extracted_features: dict[str, float] | None
     skipped_features: dict[str, str] | None
+    shapefile_geometry_type: str | None
+    shapefile_feature_count: int | None
+    shapefile_bounding_box: tuple[float, float, float, float] | None
+    shapefile_crs: str | None
+    shapefile_attributes: dict[str, object] | None
 
     @classmethod
     def from_domain(cls, job: AcquisitionJob) -> AcquisitionJobResponse:
@@ -350,6 +355,11 @@ class AcquisitionJobResponse(BaseModel):
             applied_preprocessing=[step.value for step in job.applied_preprocessing],
             extracted_features=job.extracted_features,
             skipped_features=job.skipped_features,
+            shapefile_geometry_type=job.shapefile_geometry_type,
+            shapefile_feature_count=job.shapefile_feature_count,
+            shapefile_bounding_box=job.shapefile_bounding_box,
+            shapefile_crs=job.shapefile_crs,
+            shapefile_attributes=job.shapefile_attributes,
         )
 
 

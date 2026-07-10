@@ -15,6 +15,7 @@ from georisk.contexts.identity.domain.tokens import (
     InvitationToken,
     PasswordResetToken,
     RefreshToken,
+    RevokedAccessToken,
 )
 from georisk.contexts.identity.domain.value_objects import (
     RefreshTokenId,
@@ -55,6 +56,11 @@ class RefreshTokenRepository(Protocol):
     async def revoke_all_active_for_user(
         self, user_id: UserId, *, reason: str
     ) -> list[RefreshTokenId]: ...
+
+
+class RevokedAccessTokenRepository(Protocol):
+    async def revoke(self, entry: RevokedAccessToken) -> None: ...
+    async def is_revoked(self, jti: str) -> bool: ...
 
 
 class PasswordResetTokenRepository(Protocol):

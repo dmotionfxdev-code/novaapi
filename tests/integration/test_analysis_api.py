@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from georisk.api.app import create_app
 from georisk.settings import Settings
+from tests.integration._sprint_a_seed_helpers import seed_firas_indicator_datasets_sync
 
 pytestmark = pytest.mark.integration
 
@@ -33,6 +34,11 @@ def api_client():
 
 
 def _register_and_login(client: TestClient, suffix: str) -> dict:
+    headers, _tenant_id = _register_and_login_with_tenant(client, suffix)
+    return headers
+
+
+def _register_and_login_with_tenant(client: TestClient, suffix: str) -> tuple[dict, str]:
     registration = client.post(
         "/api/v1/tenants",
         json={
@@ -43,6 +49,7 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         },
     )
     assert registration.status_code == 201, registration.text
+    tenant_id = registration.json()["tenant"]["id"]
     owner_email = registration.json()["owner"]["email"]
 
     login = client.post(
@@ -50,7 +57,8 @@ def _register_and_login(client: TestClient, suffix: str) -> dict:
         json={"email": owner_email, "password": "correct-horse-battery-staple"},
     )
     assert login.status_code == 200, login.text
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    return headers, tenant_id
 
 
 def _create_and_publish_firas_template(client: TestClient, headers: dict, suffix: str) -> str:
@@ -95,8 +103,15 @@ def test_full_firas_workflow_via_http_and_stage_results_are_readable(
     api_client: TestClient,
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
-    headers = _register_and_login(api_client, suffix)
+    headers, tenant_id = _register_and_login_with_tenant(api_client, suffix)
     template_id = _create_and_publish_firas_template(api_client, headers, suffix)
+
+    # Sprint A: AnalysisStageExecutor now reads real Data Acquisition
+    # datasets (CompositionRootIndicatorInputProvider), not
+    # StubIndicatorInputProvider — seed the exact values the stub used to
+    # fabricate, as a real cataloged dataset, so this test's downstream
+    # assertions (exact FIRAS indicator values) still hold.
+    seed_firas_indicator_datasets_sync(os.environ["DATABASE_URL"], tenant_id)
 
     create = api_client.post(
         "/api/v1/assessments",

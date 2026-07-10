@@ -16,6 +16,7 @@ from georisk.contexts.identity.domain.tokens import (
     InvitationToken,
     PasswordResetToken,
     RefreshToken,
+    RevokedAccessToken,
 )
 from georisk.contexts.identity.domain.value_objects import (
     RefreshTokenId,
@@ -30,6 +31,7 @@ from georisk.contexts.identity.infrastructure.models import (
     InvitationTokenModel,
     PasswordResetTokenModel,
     RefreshTokenModel,
+    RevokedAccessTokenModel,
     RoleModel,
     TenantModel,
     UserModel,
@@ -203,6 +205,24 @@ class SqlAlchemyRefreshTokenRepository:
             model.revoked_at = now
             revoked_ids.append(RefreshTokenId(value=model.id))
         return revoked_ids
+
+
+class SqlAlchemyRevokedAccessTokenRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def revoke(self, entry: RevokedAccessToken) -> None:
+        model = await self._session.get(RevokedAccessTokenModel, entry.jti)
+        if model is None:
+            model = RevokedAccessTokenModel()
+        mappers.apply_revoked_access_token_to_model(entry, model)
+        self._session.add(model)
+
+    async def is_revoked(self, jti: str) -> bool:
+        result = await self._session.execute(
+            select(RevokedAccessTokenModel.jti).where(RevokedAccessTokenModel.jti == jti)
+        )
+        return result.scalar_one_or_none() is not None
 
 
 class SqlAlchemyPasswordResetTokenRepository:

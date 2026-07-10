@@ -6,6 +6,7 @@ the result to a response schema. No business logic lives in this file.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
@@ -17,6 +18,7 @@ from georisk.contexts.identity.application.commands import (
     RefreshAccessToken,
     RequestPasswordReset,
     ResetPassword,
+    RevokeAllSessions,
 )
 from georisk.contexts.identity.application.handlers_auth import (
     LoginHandler,
@@ -24,14 +26,19 @@ from georisk.contexts.identity.application.handlers_auth import (
     RefreshAccessTokenHandler,
     RequestPasswordResetHandler,
     ResetPasswordHandler,
+    RevokeAllSessionsHandler,
 )
 from georisk.contexts.identity.application.ports import (
+    AccessTokenClaims,
     AccessTokenIssuer,
     OpaqueTokenGenerator,
     PasswordHasher,
 )
+from georisk.contexts.identity.domain.entities import User
 from georisk.contexts.identity.interface.dependencies import (
     get_access_token_issuer,
+    get_current_user,
+    get_optional_decoded_access_token,
     get_password_hasher,
     get_token_generator,
 )
@@ -44,11 +51,14 @@ from georisk.contexts.identity.interface.schemas import (
     TokenResponse,
 )
 from georisk.db.session import get_session
+from georisk.rate_limiting import rate_limit_by_ip
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/token", response_model=TokenResponse)
+@router.post(
+    "/token", response_model=TokenResponse, dependencies=[Depends(rate_limit_by_ip("login"))]
+)
 async def login(
     body: LoginRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -65,7 +75,11 @@ async def login(
     )
 
 
-@router.post("/token/refresh", response_model=TokenResponse)
+@router.post(
+    "/token/refresh",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limit_by_ip("token-refresh"))],
+)
 async def refresh_token(
     body: RefreshTokenRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -86,13 +100,48 @@ async def logout(
     body: LogoutRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     token_generator: Annotated[OpaqueTokenGenerator, Depends(get_token_generator)],
+    decoded_access_token: Annotated[
+        tuple[AccessTokenClaims, datetime] | None, Depends(get_optional_decoded_access_token)
+    ],
 ) -> Response:
+    """No ``Authorization`` header is required (the pre-Sprint-D contract:
+    a bare ``refresh_token`` is enough to log out) — but when the caller's
+    request does carry one, that specific access token is also revoked
+    (Sprint D requirement #1), not just the refresh token.
+    """
     handler = LogoutHandler(session, token_generator)
-    await handler.handle(Logout(refresh_token=body.refresh_token))
+    claims, expires_at = decoded_access_token if decoded_access_token is not None else (None, None)
+    await handler.handle(
+        Logout(
+            refresh_token=body.refresh_token,
+            access_token_claims=claims,
+            access_token_expires_at=expires_at,
+        )
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/sessions/revoke-all", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_all_sessions(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Sprint D requirement #1's explicit "revoke all sessions" option —
+    ends every one of the caller's own active sessions (all refresh
+    tokens, and every previously-issued access token via the
+    ``token_generation`` bump ``get_current_claims`` checks on every
+    subsequent request), e.g. after losing a device.
+    """
+    handler = RevokeAllSessionsHandler(session)
+    await handler.handle(RevokeAllSessions(user_id=str(current_user.id)))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/password-reset/request",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit_by_ip("password-reset"))],
+)
 async def request_password_reset(
     body: RequestPasswordResetRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -105,7 +154,11 @@ async def request_password_reset(
     return {"detail": "If that email is registered, a password reset link has been sent."}
 
 
-@router.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/password-reset/confirm",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_ip("password-reset"))],
+)
 async def confirm_password_reset(
     body: ResetPasswordRequest,
     session: Annotated[AsyncSession, Depends(get_session)],

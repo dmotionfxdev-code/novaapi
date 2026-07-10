@@ -11,6 +11,7 @@ import hashlib
 import secrets
 import time
 import uuid
+from datetime import UTC, datetime
 
 import jwt
 from argon2 import PasswordHasher as _Argon2PasswordHasher
@@ -74,6 +75,7 @@ class JwtAccessTokenIssuer:
             "iat": now,
             "exp": now + self._ttl_seconds,
             "jti": str(uuid.uuid4()),
+            "gen": claims.token_generation,
         }
         token = jwt.encode(payload, self._secret_key, algorithm=self._algorithm)
         return IssuedAccessToken(token=token, expires_in_seconds=self._ttl_seconds)
@@ -95,6 +97,22 @@ class JwtAccessTokenIssuer:
                 tenant_id=TenantId.from_string(payload["tenant_id"]),
                 role_name=RoleName(payload["role"]),
                 permissions=frozenset(PermissionCode(p) for p in payload.get("permissions", [])),
+                token_generation=int(payload.get("gen", 0)),
+                jti=str(payload.get("jti", "")),
             )
         except (KeyError, ValueError) as exc:
             raise AuthenticationFailedError("Access token payload is malformed") from exc
+
+    def decode_expiry(self, token: str) -> datetime:
+        """Returns the token's ``exp`` claim as a UTC datetime, ignoring
+        expiry itself (``options={"verify_exp": False}``) — used only by
+        logout to compute ``RevokedAccessToken.expires_at`` bookkeeping for
+        a token that might already be expired by the time logout runs
+        (revoking an already-expired token is a harmless no-op, not an
+        error: rejecting it outright would make logout fail exactly when a
+        client's session is oldest, the opposite of what logout is for).
+        """
+        payload = jwt.decode(
+            token, self._secret_key, algorithms=[self._algorithm], options={"verify_exp": False}
+        )
+        return datetime.fromtimestamp(payload["exp"], tz=UTC)

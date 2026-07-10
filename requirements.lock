@@ -31,7 +31,9 @@ billiard==4.2.4
 celery==5.5.3
     # via georisk (pyproject.toml)
 certifi==2026.6.17
-    # via requests
+    # via
+    #   pyogrio
+    #   requests
 cffi==2.0.0
     # via
     #   argon2-cffi-bindings
@@ -127,6 +129,10 @@ mako==1.3.12
     # via alembic
 markupsafe==3.0.3
     # via mako
+numpy==2.2.6
+    # via
+    #   pyogrio
+    #   shapely
 opentelemetry-api==1.29.0
     # via
     #   georisk (pyproject.toml)
@@ -171,6 +177,7 @@ packaging==26.2
     #   geoalchemy2
     #   kombu
     #   opentelemetry-instrumentation
+    #   pyogrio
 prompt-toolkit==3.0.52
     # via click-repl
 proto-plus==1.28.0
@@ -198,6 +205,8 @@ pydantic-settings==2.7.1
     # via georisk (pyproject.toml)
 pyjwt==2.10.1
     # via georisk (pyproject.toml)
+pyogrio==0.13.0
+    # via georisk (pyproject.toml)
 pyparsing==3.3.2
     # via httplib2
 python-dateutil==2.9.0.post0
@@ -219,6 +228,8 @@ requests==2.34.2
     #   google-api-core
     #   google-cloud-storage
     #   opentelemetry-exporter-otlp-proto-http
+shapely==2.1.2
+    # via georisk (pyproject.toml)
 six==1.17.0
     # via python-dateutil
 sqlalchemy[asyncio]==2.0.36
