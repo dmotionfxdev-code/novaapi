@@ -289,6 +289,46 @@ This is exactly the kind of fact this audit's "Do NOT guess" instruction was wri
 recorded here because Render's own documentation (fetched and quoted in §3/§4) did not
 surface either constraint; only submitting the real file to the real platform did.
 
+### 8b. Runtime failure on first real deploy, and the one code change it required
+
+The Blueprint applied cleanly (Postgres and Redis provisioned), but `georisk-api` crashed on
+boot with `ModuleNotFoundError: No module named 'psycopg2'` inside
+`create_async_engine()` → `sqlalchemy/dialects/postgresql/psycopg2.py`.
+
+**Root cause**: Render's managed Postgres `connectionString` property returns a plain
+`postgresql://user:pass@host:port/db` URL — no driver suffix. SQLAlchemy resolves a
+driver-less `postgresql://` URL to its default **synchronous** dialect (`psycopg2`), not
+`asyncpg`; this image only installs `asyncpg` (this project's engines are all async by
+design). The app's own default (`"postgresql+asyncpg://..."` in `settings.py`) always
+included the driver explicitly, so this never surfaced in any of the 560 tests or three prior
+sprints' live-HTTP validation — every one of those constructed the URL by hand, already
+correct. It only surfaces against a *real* managed-Postgres add-on that hands back a
+driver-less string, which is standard for Render (and Railway; likely Heroku-style
+`postgres://` too).
+
+**Fix** (`src/georisk/settings.py`, `Settings.database_url`'s new `field_validator`): rewrite
+a `postgres://` or `postgresql://` URL (no driver) to `postgresql+asyncpg://` at the single
+seam every consumer already goes through — this is the *only* place that needed the fix,
+because `migrations/env.py` builds its **own**, independent async engine directly from
+`get_settings().database_url` (not via `Database`), so fixing `Database.__init__` alone would
+have left `alembic upgrade head` failing the identical way when run manually via Render's
+Shell. A URL that already specifies a driver (`postgresql+asyncpg://`, the default and every
+test's value) passes through unchanged.
+
+**Verified, not assumed**: constructed `Settings(database_url=...)` for all three real-world
+shapes (`postgresql+asyncpg://...` unchanged, `postgresql://...` → rewritten,
+`postgres://...` → rewritten); ran `alembic current` against a real Postgres instance with
+`DATABASE_URL` set to the exact driver-less form Render returns — reports `0019_security_
+hardening (head)` cleanly, where it previously would have thrown the same `psycopg2` error
+the live deploy hit. Re-ran the full suite fresh: **560 passed, 1 skipped, 0 failed** (2
+unrelated failures on the first pass — `.env` pollution from copying a local dev file into
+the scratch validation directory, not a real regression — disappeared once that file was
+removed from the scratch copy). `ruff`/`mypy` (276 files)/`lint-imports` (4/4 kept) all clean.
+
+This is a **deployment-portability fix** (a config-parsing normalization at the settings
+boundary), not a business-logic, API, or DDD-boundary change — no route, command, handler, or
+domain type was touched.
+
 ---
 
 ## 9. What This Audit Did Not Do (and why)

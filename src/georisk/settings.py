@@ -21,6 +21,30 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://georisk:georisk_dev@localhost:5432/georisk"
     db_pool_size: int = 10
 
+    @field_validator("database_url")
+    @classmethod
+    def _require_asyncpg_driver(cls, value: str) -> str:
+        """Managed Postgres add-ons (Render, Railway, Heroku-style
+        `postgres://`, ...) hand back a plain `postgresql://` or
+        `postgres://` connection string with no driver suffix — SQLAlchemy
+        silently defaults a driver-less URL to the *synchronous* psycopg2
+        dialect, which this project deliberately never installs (every
+        engine here is async, `sqlalchemy[asyncio]` + `asyncpg`). Left
+        uncorrected, that surfaces at startup as `ModuleNotFoundError: No
+        module named 'psycopg2'` — caught deploying to Render's free
+        Postgres during the Render/Railway/Fly.io deployment audit, not
+        assumed in advance. Normalizing here (the one seam every consumer
+        of `database_url` goes through — `Database.__init__` AND
+        `migrations/env.py`, which builds its own engine independently)
+        fixes both call sites at once instead of duplicating this rewrite
+        in two files.
+        """
+        if value.startswith("postgres://"):
+            return "postgresql+asyncpg://" + value.removeprefix("postgres://")
+        if value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value.removeprefix("postgresql://")
+        return value
+
     redis_url: str = "redis://localhost:6379/0"
     redis_cache_url: str = "redis://localhost:6379/1"
     redis_ratelimit_url: str = "redis://localhost:6379/2"
