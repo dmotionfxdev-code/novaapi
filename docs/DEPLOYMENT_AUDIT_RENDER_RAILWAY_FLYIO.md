@@ -266,6 +266,29 @@ Both new files were parsed and validated in this session (`yaml.safe_load(render
 `tomli.load(fly.toml)` both succeed and produce exactly the intended structure — not just
 visually inspected).
 
+### 8a. Corrections made after Render's own Blueprint validator (ground truth beats docs)
+
+Submitting `render.yaml` to Render's actual Blueprint validator (via the dashboard) surfaced
+two constraints its own documentation had not made obvious in advance:
+
+1. **`ipAllowList` is mandatory for every Key Value (`keyvalue`) instance** — the Blueprint
+   fails validation without it, not just a warning. Added `source: 0.0.0.0/0` with a
+   description — this cache holds no sensitive data (rate-limit counters, a health-check
+   ping), so "allow all" is an honest, low-risk default; tighten it later if stricter network
+   isolation is wanted.
+2. **`preDeployCommand` is rejected outright when the same service's `plan` is `free`** — this
+   is a hard validation failure ("pre-deploy command is not supported for free tier
+   services"), not a soft degrade. `render.yaml` now ships with the line commented out and two
+   documented options: run `alembic upgrade head` once manually via Render's Shell/Jobs tab
+   after the first free-tier deploy, or upgrade `georisk-api`'s plan to `starter`+ to get
+   automatic pre-deploy migrations. This is the correct, honest reflection of a real free-tier
+   limitation, not something to route around by weakening this project's own established rule
+   that migrations are never a side effect of the API process starting.
+
+This is exactly the kind of fact this audit's "Do NOT guess" instruction was written for —
+recorded here because Render's own documentation (fetched and quoted in §3/§4) did not
+surface either constraint; only submitting the real file to the real platform did.
+
 ---
 
 ## 9. What This Audit Did Not Do (and why)

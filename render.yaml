@@ -36,6 +36,12 @@ services:
     plan: free # 25 MB — ample for this app's only two Redis consumers
       # (the health check ping and the Sprint D rate limiter, which
       # already falls back gracefully if this were ever unreachable).
+    ipAllowList: # Required by Render for every Key Value instance. This
+      # cache holds nothing sensitive (rate-limit counters, a health-check
+      # ping) — "allow all" is fine; tighten to Render's specific outbound
+      # IP ranges if you want stricter network isolation later.
+      - source: 0.0.0.0/0
+        description: Allow all — no sensitive data in this cache
 
   - name: georisk-api
     type: web
@@ -45,14 +51,23 @@ services:
       # once this is more than a verification deployment.
     dockerfilePath: ./docker/api/Dockerfile
     dockerContext: .
-    preDeployCommand: alembic upgrade head # Runs after build, before the
-      # new version goes live — matches this project's own established
-      # rule that migrations are an explicit, separate step, never a
-      # side effect of the API process starting (docker/entrypoints/
-      # api.sh's own comment). Picks up DATABASE_URL from envVars below
-      # automatically (migrations/env.py reads it via georisk.settings.
-      # get_settings(), the same single source of truth the app itself
-      # uses — no separate migration-only config needed).
+    # preDeployCommand: alembic upgrade head
+      # ^ Commented out deliberately: Render rejects `preDeployCommand` on
+      # the free plan ("pre-deploy command is not supported for free tier
+      # services") — this isn't a soft warning, the whole Blueprint fails
+      # validation if the key is present at all while this service's plan
+      # is "free". Two options:
+      #   (a) Stay on the free plan and run the migration ONCE manually
+      #       after the first deploy succeeds: georisk-api's dashboard ->
+      #       "Shell" (or the "Jobs" tab, if Shell isn't offered on your
+      #       account) -> run `alembic upgrade head`. Only needed again
+      #       when a future deploy adds new migrations.
+      #   (b) Upgrade this service's `plan` to `starter` (or higher) and
+      #       uncomment the line above — Render then runs migrations
+      #       automatically before every deploy goes live, matching this
+      #       project's own "migrations are an explicit, separate step"
+      #       rule (docker/entrypoints/api.sh's own comment) without a
+      #       manual step each time.
     healthCheckPath: /health/ready # Safe to use even if Redis is ever
       # briefly unreachable — Sprint D made /health/ready report 200
       # "degraded" (not 503) for a Redis-only outage, so a flaky Redis
