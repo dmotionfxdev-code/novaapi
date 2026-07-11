@@ -10,7 +10,12 @@ if [ "${ENVIRONMENT:-development}" = "development" ]; then
   RELOAD_FLAG="--reload"
 fi
 
+# Deployment-audit finding (docs/DEPLOYMENT_AUDIT_RENDER_RAILWAY_FLYIO.md §7):
+# Railway assigns a dynamic port via $PORT and requires the process to bind
+# to it; Render/Fly.io/docker-compose/cPanel do not set $PORT, so the
+# ${PORT:-8000} fallback keeps every other existing deployment path
+# byte-for-byte identical to before this change.
 exec uvicorn georisk.api.app:app \
   --host 0.0.0.0 \
-  --port 8000 \
+  --port "${PORT:-8000}" \
   ${RELOAD_FLAG}

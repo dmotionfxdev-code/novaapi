@@ -66,7 +66,14 @@ RUN gdalinfo --formats | grep -qi "GTiff" \
 
 USER georisk
 
+# Deployment-audit finding (docs/DEPLOYMENT_AUDIT_RENDER_RAILWAY_FLYIO.md §7):
+# EXPOSE documents the default port for platforms (e.g. Render) that can
+# auto-detect a bound port from image metadata; the HEALTHCHECK reads the
+# same ${PORT:-8000} the entrypoint now binds to, so it still checks the
+# right port on a platform (Railway) that overrides PORT at runtime.
+EXPOSE 8000
+
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
-    CMD curl -f http://localhost:8000/health/live || exit 1
+    CMD curl -f "http://localhost:${PORT:-8000}/health/live" || exit 1
 
 ENTRYPOINT ["./entrypoints/api.sh"]

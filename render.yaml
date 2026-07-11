@@ -1,0 +1,92 @@
+# Render Blueprint (Infrastructure-as-Code) — deploys the existing
+# docker/api/Dockerfile unmodified (aside from the PORT/EXPOSE fix in
+# docs/DEPLOYMENT_AUDIT_RENDER_RAILWAY_FLYIO.md §7). No worker/beat/relay
+# services are declared here — traced in that audit (§1) to carry zero real
+# Celery tasks; nothing in this codebase enqueues one, so they are not
+# required for the API to function.
+#
+# Usage: https://dashboard.render.com/blueprints -> "New Blueprint Instance"
+# -> point at this repository. Render reads this file and provisions every
+# resource below in one pass.
+#
+# Fields left for you to fill in after the first deploy (Render's dashboard,
+# not this file, since they're either secrets or deployment-specific):
+#   - CORS_ALLOWED_ORIGINS: replace the placeholder with your real frontend
+#     origin(s), comma-separated, no "*" (see settings.py's own warning).
+#   - GEE_SERVICE_ACCOUNT_EMAIL / GEE_SERVICE_ACCOUNT_PRIVATE_KEY / GEE_PROJECT_ID:
+#     only needed if Google Earth Engine acquisition is actually used —
+#     every other Data Acquisition provider (Local Upload, USGS, NASA,
+#     Copernicus) works without them, honestly failing if left unset.
+#   - SMTP_*: only needed if the Notification email channel is used.
+
+databases:
+  - name: georisk-postgres
+    plan: free # NOTE: Render's free Postgres is deleted 30 days after
+      # creation (1 GB cap) — fine for the live-verification pass this
+      # Blueprint is meant to support; upgrade to a paid plan (e.g.
+      # basic-256mb) before relying on this for real production data.
+      # No PostGIS/pgcrypto extension is required (see the deployment
+      # audit's Database row) — Render's plain managed Postgres is
+      # sufficient as-is.
+    postgresMajorVersion: "16"
+
+services:
+  - name: georisk-cache
+    type: keyvalue
+    plan: free # 25 MB — ample for this app's only two Redis consumers
+      # (the health check ping and the Sprint D rate limiter, which
+      # already falls back gracefully if this were ever unreachable).
+
+  - name: georisk-api
+    type: web
+    runtime: docker
+    plan: free # Sleeps after 15 min idle on the free plan (30-60s cold
+      # start on the next request) — upgrade to "starter" to keep it warm
+      # once this is more than a verification deployment.
+    dockerfilePath: ./docker/api/Dockerfile
+    dockerContext: .
+    preDeployCommand: alembic upgrade head # Runs after build, before the
+      # new version goes live — matches this project's own established
+      # rule that migrations are an explicit, separate step, never a
+      # side effect of the API process starting (docker/entrypoints/
+      # api.sh's own comment). Picks up DATABASE_URL from envVars below
+      # automatically (migrations/env.py reads it via georisk.settings.
+      # get_settings(), the same single source of truth the app itself
+      # uses — no separate migration-only config needed).
+    healthCheckPath: /health/ready # Safe to use even if Redis is ever
+      # briefly unreachable — Sprint D made /health/ready report 200
+      # "degraded" (not 503) for a Redis-only outage, so a flaky Redis
+      # connection alone will never fail Render's own health check and
+      # trigger an unwanted rollback/restart loop.
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: georisk-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: georisk-cache
+          property: connectionString
+      - key: REDIS_RATELIMIT_URL
+        fromService:
+          type: keyvalue
+          name: georisk-cache
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true # Render generates a random 256-bit secret —
+          # satisfies settings.py's guard that rejects the insecure dev
+          # default when ENVIRONMENT=production.
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://REPLACE-WITH-YOUR-FRONTEND-DOMAIN.example
+      - key: GEE_SERVICE_ACCOUNT_EMAIL
+        sync: false # Set manually in the Render dashboard if/when needed
+        # — never committed to this file. Left unset, GEE honestly fails
+        # immediately rather than fabricating data (existing behavior,
+        # unchanged by this deployment).
+      - key: GEE_SERVICE_ACCOUNT_PRIVATE_KEY
+        sync: false
+      - key: GEE_PROJECT_ID
+        sync: false
