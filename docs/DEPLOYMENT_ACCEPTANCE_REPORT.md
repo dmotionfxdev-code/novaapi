@@ -221,6 +221,33 @@ silently faked) when not requested or when unsupported for a source (MODIS), plu
 real-network integration test requesting `CLOUD_MASKING` against the live Earth Engine API. Full
 detail: `RELEASE_CANDIDATE_CHECKLIST.md` §6.
 
+### 15c. Update — a fourth, genuine issue found and fixed: `Not valid JSON` crash on a bad provider/format combination
+
+A subsequent report: `Not valid JSON: 'utf-8' codec can't decode byte 0xd0 in position 45: invalid
+continuation byte`. Traced to source, not guessed: the exact string `"Not valid JSON: "` exists in
+exactly two places in this codebase — `domain/validation.py`'s `validate_geojson()` (line 89) and
+`validate_json()` (line 175) — both wrapping a `json.loads(content)` call's `UnicodeDecodeError`
+(confirmed via `inspect`/live grep that no third-party library in this stack — `requests`, `httpx`,
+`earthengine-api` — produces this exact message shape). `gee_connector.py` itself never calls
+`json.loads` on raw bytes; its raster download path (`response.content`, real binary GeoTIFF data)
+is assigned straight to `FetchResult.content`. The actual break was one layer up: **nothing in this
+codebase ever validated that a `GOOGLE_EARTH_ENGINE` job's declared `format` was `GEOTIFF`** —
+`AcquisitionJob.schedule()` checked `remote_sensing_source`/`aoi_id` but not `format`, and the
+frontend's general-purpose `ScheduleAcquisitionWizard.php` defaults its format dropdown to
+`GEOJSON` independent of which provider is selected in the same wizard (only the GEE-specific
+`RemoteSensingPage.php` hardcodes `format: GeoTiff` — this wizard is a separate, older UI path
+that does not). A job scheduled as `provider=GOOGLE_EARTH_ENGINE, format=GEOJSON` therefore passed
+scheduling cleanly, then crashed at execute-time when `GoogleEarthEngineProvider`'s real (always
+binary) raster bytes reached `validate_geojson()`'s `json.loads()`. Classified as a **Bug**
+(missing input validation, not a GEE or code-generation defect — GEE's own download path was
+independently re-confirmed working via the two fixes above) and fixed with a schedule-time guard:
+GOOGLE_EARTH_ENGINE jobs must declare `format=GEOTIFF`, rejected immediately with a clear
+`InvalidAcquisitionJobError` otherwise, mirroring this method's existing `remote_sensing_source`/
+`aoi_id` guards. Also added diagnostic logging (Content-Type header + hex/printable byte prefix) in
+`gee_connector.py` for the rare case a download's content doesn't start with a real TIFF header.
+Verified with new unit tests covering both the schedule-time rejection (all four non-GEOTIFF
+formats) and the diagnostic logging. Full detail: `RELEASE_CANDIDATE_CHECKLIST.md` §6.
+
 ---
 
 ## Operational Note: one transient network error, not a deployment defect

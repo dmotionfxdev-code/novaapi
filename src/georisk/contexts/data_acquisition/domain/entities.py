@@ -434,6 +434,24 @@ class AcquisitionJob:
                 "getDownloadURL both need a bounded region, and an unbounded global "
                 "export is not something this platform allows silently"
             )
+        if provider == DataProvider.GOOGLE_EARTH_ENGINE and format != AcquisitionFormat.GEOTIFF:
+            # Bug fix: nothing constrained `format` to match `provider` before
+            # this guard — a GOOGLE_EARTH_ENGINE job scheduled with format
+            # JSON/GEOJSON/CSV/SHAPEFILE would pass schedule() cleanly, only
+            # to crash later at execute-time when GoogleEarthEngineProvider's
+            # real raster bytes (a genuine GeoTIFF — always binary, never
+            # UTF-8 text) reached validate_json()/validate_geojson()'s
+            # json.loads(content), surfacing a confusing
+            # "'utf-8' codec can't decode byte ...: invalid continuation
+            # byte" error instead of an honest, immediate rejection. GEE
+            # acquisitions only ever produce raster content (or no content,
+            # per the raster-download-optional bug fix), so GEOTIFF is the
+            # only format that can ever be correct here.
+            raise InvalidAcquisitionJobError(
+                "GOOGLE_EARTH_ENGINE acquisition jobs must use format GEOTIFF "
+                f"(got {format.value}) — Earth Engine fetches always produce raster "
+                "content, never JSON/GeoJSON/CSV/Shapefile"
+            )
         now = datetime.now(UTC)
         job = cls(
             id=AcquisitionJobId.new(),

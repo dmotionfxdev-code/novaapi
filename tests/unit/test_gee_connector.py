@@ -237,6 +237,68 @@ def test_fetch_skips_raster_download_and_still_succeeds_on_size_limit_error() ->
     assert "request-size limit" in result.raster_skipped_reason
 
 
+# --- Bug fix: "Not valid JSON: 'utf-8' codec can't decode byte..." ----------
+#
+# Root cause was NOT in this file — a GOOGLE_EARTH_ENGINE job scheduled with
+# a non-GEOTIFF format (JSON/GEOJSON/...) passed AcquisitionJob.schedule()
+# uncaught, then crashed at execute-time when this provider's real (binary)
+# raster bytes reached domain/validation.py's json.loads(). The real fix is
+# a schedule-time guard in domain/entities.py (see
+# tests/unit/test_data_acquisition_domain.py::
+# test_schedule_gee_job_rejects_non_geotiff_format). This test only proves
+# the accompanying diagnostic improvement made here: if a download's content
+# ever doesn't start with a TIFF header, its Content-Type and a hex/printable
+# prefix are logged — the one place that still has the real HTTP response
+# available, since that context is gone by the time validate_dataset_content
+# only sees raw bytes.
+
+
+def test_fetch_logs_diagnostics_when_download_content_is_not_a_real_tiff(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FakeResponse:
+        headers = {"Content-Type": "text/html"}
+        content = b"<html>not a tiff</html>"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeImage:
+        def reduceRegion(self, **_kwargs: object) -> _FakeImage:
+            return self
+
+        def getInfo(self) -> dict[str, float]:
+            return {"B4": 0.12}
+
+        def getDownloadURL(self, _params: dict) -> str:
+            return "https://example.invalid/download"
+
+    provider = GoogleEarthEngineProvider(
+        service_account_email="svc@example.iam.gserviceaccount.com",
+        service_account_private_key="fake-key-data",
+        project_id="fake-project",
+    )
+    provider._initialized = True
+
+    with caplog.at_level("WARNING", logger="georisk.data_acquisition.gee"), mock.patch.object(
+        GoogleEarthEngineProvider, "_build_composite", return_value=(_FakeImage(), [])
+    ), mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.Geometry",
+        return_value=object(),
+    ), mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.Reducer"
+    ), mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.requests.get",
+        return_value=_FakeResponse(),
+    ):
+        result = asyncio.run(provider.fetch(source_reference="ignored", spec=_spec()))
+
+    assert result.success is True, result.error
+    assert result.content == b"<html>not a tiff</html>"
+    assert any("did not start with a TIFF header" in record.message for record in caplog.records)
+    assert any("text/html" in record.message for record in caplog.records)
+
+
 # --- Bug fix: Image.bitwiseAnd: Bitwise operands must be integer only -------
 #
 # Root cause: ee.ImageCollection.median() always returns FLOAT-typed bands

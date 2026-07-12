@@ -88,6 +88,14 @@ from georisk.contexts.data_acquisition.domain.value_objects import (
 
 logger = logging.getLogger("georisk.data_acquisition.gee")
 
+#: TIFF magic bytes (little-endian "II*\x00" / big-endian "MM\x00*") —
+#: deliberately mirrors domain/validation.py's own ``_TIFF_MAGIC`` (used
+#: there by ``validate_geotiff()``) rather than importing that module's
+#: private constant: this is a diagnostic pre-check only (logs, does not
+#: reject), and infrastructure has no business depending on a leading-
+#: underscore domain internal for that.
+_TIFF_MAGIC = (b"II*\x00", b"MM\x00*")
+
 #: The exact two substrings Earth Engine's own error text contains when
 #: `Image.getDownloadURL()` rejects a request for exceeding its
 #: synchronous request-size limit — observed verbatim against the real
@@ -332,6 +340,30 @@ class GoogleEarthEngineProvider:
             response = requests.get(download_url, timeout=120)
             response.raise_for_status()
             raster_content = response.content
+            logger.debug(
+                "GEE raster download for %s: Content-Type=%s, %d bytes",
+                source.value,
+                response.headers.get("Content-Type"),
+                len(raster_content),
+            )
+            if raster_content[:4] not in _TIFF_MAGIC:
+                # Diagnostic only — this platform's only consumer of this
+                # content is validate_geotiff()'s own magic-byte check
+                # (domain/validation.py), which will independently reject
+                # it too. Logged here, at the one place that still has the
+                # real HTTP response (Content-Type header, exact byte
+                # prefix) available, since that context is gone by the
+                # time validate_dataset_content() sees only raw bytes.
+                logger.warning(
+                    "GEE raster download for %s did not start with a TIFF header "
+                    "(Content-Type=%s); first 32 bytes hex=%s printable=%r",
+                    source.value,
+                    response.headers.get("Content-Type"),
+                    raster_content[:32].hex(),
+                    "".join(
+                        chr(b) if 32 <= b < 127 else "." for b in raster_content[:32]
+                    ),
+                )
         except (ee.EEException, requests.HTTPError) as exc:
             if not _is_request_size_limit_error(exc):
                 raise

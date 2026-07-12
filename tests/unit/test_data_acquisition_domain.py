@@ -310,6 +310,35 @@ def test_schedule_gee_job_requires_aoi_id() -> None:
         )
 
 
+def test_schedule_gee_job_rejects_non_geotiff_format() -> None:
+    """Bug fix: a GOOGLE_EARTH_ENGINE job scheduled with format JSON/GEOJSON/
+    CSV/SHAPEFILE used to pass schedule() cleanly and only crash at
+    execute-time when the real (binary) raster bytes reached
+    validate_json()/validate_geojson()'s json.loads(), surfacing a
+    confusing UnicodeDecodeError instead of an honest, immediate
+    rejection. Earth Engine fetches only ever produce raster content, so
+    GEOTIFF is the only valid format for this provider."""
+    for bad_format in (
+        AcquisitionFormat.JSON,
+        AcquisitionFormat.GEOJSON,
+        AcquisitionFormat.CSV,
+        AcquisitionFormat.SHAPEFILE,
+    ):
+        with pytest.raises(InvalidAcquisitionJobError, match="GEOTIFF"):
+            AcquisitionJob.schedule(
+                tenant_id=TenantId.new(),
+                provider=DataProvider.GOOGLE_EARTH_ENGINE,
+                source_reference="ignored",
+                format=bad_format,
+                dataset_source_id=DatasetSourceId.new(),
+                declared_crs="EPSG:4326",
+                raw_content_base64=None,
+                requested_by="analyst-1",
+                remote_sensing_source=RemoteSensingSource.SENTINEL_2,
+                aoi_id="aoi-123",
+            )
+
+
 def test_schedule_gee_job_with_valid_remote_sensing_fields() -> None:
     job, event = AcquisitionJob.schedule(
         tenant_id=TenantId.new(),
