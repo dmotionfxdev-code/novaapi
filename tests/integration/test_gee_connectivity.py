@@ -66,7 +66,10 @@ async def test_real_gee_fetch_returns_band_statistics_over_a_small_aoi(
                 [[36.80, -1.30], [36.80, -1.29], [36.81, -1.29], [36.81, -1.30], [36.80, -1.30]]
             ],
         },
-        requested_preprocessing=(PreprocessingStep.RADIOMETRIC_CORRECTION,),
+        requested_preprocessing=(
+            PreprocessingStep.RADIOMETRIC_CORRECTION,
+            PreprocessingStep.CLOUD_MASKING,
+        ),
     )
     result = await gee_provider.fetch(source_reference="ignored", spec=spec)
     assert result.success is True, result.error
@@ -76,6 +79,11 @@ async def test_real_gee_fetch_returns_band_statistics_over_a_small_aoi(
     # Bug fix (post-RC1 Production Acceptance Test): a genuinely successful
     # raster download must never carry a "skipped" reason.
     assert result.raster_skipped_reason is None
+    # Bug fix (Image.bitwiseAnd crash): the real, historically-failing
+    # reproduction case — CLOUD_MASKING requested against a real
+    # Sentinel-2 fetch must genuinely apply (masking-before-compositing)
+    # rather than crash with "Bitwise operands must be integer only."
+    assert PreprocessingStep.CLOUD_MASKING in result.applied_preprocessing
 
 
 async def test_real_gee_fetch_succeeds_via_statistics_when_raster_exceeds_size_limit(

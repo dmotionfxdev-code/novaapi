@@ -31,12 +31,17 @@ import ee
 import pytest
 
 from georisk.contexts.data_acquisition.application.ports import RemoteSensingFetchSpec
-from georisk.contexts.data_acquisition.domain.value_objects import RemoteSensingSource
+from georisk.contexts.data_acquisition.domain.value_objects import (
+    PreprocessingStep,
+    RemoteSensingSource,
+)
 from georisk.contexts.data_acquisition.infrastructure.gee_connector import (
     _COLLECTION_BY_SOURCE,
     _NATIVE_SCALE_METRES_BY_SOURCE,
     GoogleEarthEngineProvider,
     _is_request_size_limit_error,
+    _mask_landsat_clouds,
+    _mask_sentinel2_clouds,
 )
 
 pytestmark = pytest.mark.unit
@@ -230,3 +235,148 @@ def test_fetch_skips_raster_download_and_still_succeeds_on_size_limit_error() ->
     assert result.band_statistics == {"B4": 0.12, "B8": 0.34}
     assert result.raster_skipped_reason is not None
     assert "request-size limit" in result.raster_skipped_reason
+
+
+# --- Bug fix: Image.bitwiseAnd: Bitwise operands must be integer only -------
+#
+# Root cause: ee.ImageCollection.median() always returns FLOAT-typed bands
+# for every band, including QA60/QA_PIXEL bitmask bands, regardless of the
+# source bands' integer type — a well-documented, real Earth Engine
+# behaviour, not specific to this codebase. Cloud masking was previously
+# applied AFTER .median() compositing, in _apply_preprocessing(), so its
+# QA-band .bitwiseAnd() calls crashed against the composite's float-typed
+# QA band. The fix moves masking to run per-image, via
+# ee.ImageCollection.map(...), BEFORE .median() — proven below by asserting
+# the actual call order on a fake collection, not just that some masking
+# function exists somewhere in the module.
+
+
+class _FakeCollection:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.mapped_with: list[object] = []
+
+    def filterBounds(self, _region: object) -> _FakeCollection:
+        self.calls.append("filterBounds")
+        return self
+
+    def filterDate(self, _start: str, _end: str) -> _FakeCollection:
+        self.calls.append("filterDate")
+        return self
+
+    def map(self, fn: object) -> _FakeCollection:
+        self.calls.append("map")
+        self.mapped_with.append(fn)
+        return self
+
+    def median(self) -> object:
+        self.calls.append("median")
+        return object()
+
+
+def test_build_composite_masks_sentinel2_clouds_via_map_before_median() -> None:
+    fake_collection = _FakeCollection()
+    provider = GoogleEarthEngineProvider(
+        service_account_email="svc@example.iam.gserviceaccount.com",
+        service_account_private_key="fake-key-data",
+        project_id="fake-project",
+    )
+
+    with mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.ImageCollection",
+        return_value=fake_collection,
+    ):
+        _image, applied = provider._build_composite(
+            source=RemoteSensingSource.SENTINEL_2,
+            region=object(),
+            declared_crs="EPSG:4326",
+            temporal_start=None,
+            temporal_end=None,
+            requested_preprocessing=(PreprocessingStep.CLOUD_MASKING,),
+        )
+
+    assert fake_collection.calls == ["filterBounds", "map", "median"]
+    assert fake_collection.mapped_with == [_mask_sentinel2_clouds]
+    assert applied == [PreprocessingStep.CLOUD_MASKING]
+
+
+def test_build_composite_masks_landsat_clouds_via_map_before_median() -> None:
+    fake_collection = _FakeCollection()
+    provider = GoogleEarthEngineProvider(
+        service_account_email="svc@example.iam.gserviceaccount.com",
+        service_account_private_key="fake-key-data",
+        project_id="fake-project",
+    )
+
+    with mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.ImageCollection",
+        return_value=fake_collection,
+    ):
+        _image, applied = provider._build_composite(
+            source=RemoteSensingSource.LANDSAT,
+            region=object(),
+            declared_crs="EPSG:4326",
+            temporal_start=None,
+            temporal_end=None,
+            requested_preprocessing=(PreprocessingStep.CLOUD_MASKING,),
+        )
+
+    assert fake_collection.calls == ["filterBounds", "map", "median"]
+    assert fake_collection.mapped_with == [_mask_landsat_clouds]
+    assert applied == [PreprocessingStep.CLOUD_MASKING]
+
+
+def test_build_composite_skips_map_when_cloud_masking_not_requested() -> None:
+    """No CLOUD_MASKING in the requested steps must mean .map() is never
+    called at all — not called-with-a-noop — proving this is a real
+    conditional wire-up, not always-on masking."""
+    fake_collection = _FakeCollection()
+    provider = GoogleEarthEngineProvider(
+        service_account_email="svc@example.iam.gserviceaccount.com",
+        service_account_private_key="fake-key-data",
+        project_id="fake-project",
+    )
+
+    with mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.ImageCollection",
+        return_value=fake_collection,
+    ):
+        _image, applied = provider._build_composite(
+            source=RemoteSensingSource.SENTINEL_2,
+            region=object(),
+            declared_crs="EPSG:4326",
+            temporal_start=None,
+            temporal_end=None,
+            requested_preprocessing=(),
+        )
+
+    assert fake_collection.calls == ["filterBounds", "median"]
+    assert applied == []
+
+
+def test_build_composite_leaves_modis_cloud_masking_honestly_unapplied() -> None:
+    """MODIS has no usable QA band wired into this pipeline (see the
+    module docstring) — requesting CLOUD_MASKING for it must not silently
+    fabricate an "applied" claim, and must not call .map() either."""
+    fake_collection = _FakeCollection()
+    provider = GoogleEarthEngineProvider(
+        service_account_email="svc@example.iam.gserviceaccount.com",
+        service_account_private_key="fake-key-data",
+        project_id="fake-project",
+    )
+
+    with mock.patch(
+        "georisk.contexts.data_acquisition.infrastructure.gee_connector.ee.ImageCollection",
+        return_value=fake_collection,
+    ):
+        _image, applied = provider._build_composite(
+            source=RemoteSensingSource.MODIS,
+            region=object(),
+            declared_crs="EPSG:4326",
+            temporal_start=None,
+            temporal_end=None,
+            requested_preprocessing=(PreprocessingStep.CLOUD_MASKING,),
+        )
+
+    assert fake_collection.calls == ["filterBounds", "median"]
+    assert applied == []

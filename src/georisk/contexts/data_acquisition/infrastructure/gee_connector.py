@@ -40,10 +40,15 @@ Design decisions, named rather than hidden (Sprint 14 requirements #2/#3/
   MOD09GA product's own per-band QA is a coarser, less standard bitmask
   not worth the added complexity this sprint), CHIRPS, or ERA5 (no cloud
   concept for precipitation/reanalysis products).
-- Every ``ee.ImageCollection`` is composited via ``.median()`` before any
-  further processing — the standard Earth Engine idiom for a cloud-
-  reduced composite over a date range, real and well-documented, not
-  invented for this platform.
+- Every ``ee.ImageCollection`` is composited via ``.median()`` — the
+  standard Earth Engine idiom for a cloud-reduced composite over a date
+  range, real and well-documented, not invented for this platform.
+  CLOUD_MASKING runs per-image via ``.map()`` BEFORE this compositing,
+  not after (bug fix: see ``_build_composite``'s docstring — masking the
+  already-composited image was both semantically wrong and the literal
+  cause of a real ``Image.bitwiseAnd: Bitwise operands must be integer
+  only`` crash, since ``.median()`` always returns float-typed bands,
+  including QA/bitmask bands, regardless of the source bands' type).
 - AOI is a hard requirement for a GEE job (enforced in
   ``AcquisitionJob.schedule()``): ``getDownloadURL``/``reduceRegion``
   need a bounded region, and letting a GEE job request an unbounded
@@ -187,18 +192,16 @@ def _apply_preprocessing(
     declared_crs: str,
     requested_steps: tuple[PreprocessingStep, ...],
 ) -> tuple[ee.Image, list[PreprocessingStep]]:
+    """Every step here runs on the already-composited single ``ee.Image``
+    — CLOUD_MASKING is deliberately NOT handled here (bug fix: see
+    ``_build_composite``'s docstring for why masking a composite is both
+    wrong and the literal cause of a real
+    ``Image.bitwiseAnd: Bitwise operands must be integer only`` crash;
+    masking must happen per-image, before compositing, not here).
+    """
     applied: list[PreprocessingStep] = []
     for step in requested_steps:
-        if step == PreprocessingStep.CLOUD_MASKING:
-            if source == RemoteSensingSource.SENTINEL_2:
-                image = _mask_sentinel2_clouds(image)
-                applied.append(step)
-            elif source == RemoteSensingSource.LANDSAT:
-                image = _mask_landsat_clouds(image)
-                applied.append(step)
-            # else: no usable cloud/QA band for this source in this
-            # pipeline — honestly not applied, not silently faked.
-        elif step == PreprocessingStep.ATMOSPHERIC_CORRECTION:
+        if step == PreprocessingStep.ATMOSPHERIC_CORRECTION:
             if source in _ALREADY_ATMOSPHERICALLY_CORRECTED_SOURCES:
                 applied.append(step)
         elif step == PreprocessingStep.RADIOMETRIC_CORRECTION:
@@ -369,11 +372,45 @@ class GoogleEarthEngineProvider:
             collection = collection.filterDate(
                 temporal_start.date().isoformat(), temporal_end.date().isoformat()
             )
+
+        # Bug fix: CLOUD_MASKING must run per-image, via .map(), BEFORE
+        # .median() composites the collection — not after, on the
+        # already-composited single image (the original bug here).
+        # ee.ImageCollection.median() is a per-band reducer that runs
+        # across EVERY band, including QA60/QA_PIXEL, and Earth Engine's
+        # median reducer always returns a FLOAT-typed band regardless of
+        # the inputs' integer type (well-documented Earth Engine
+        # behaviour, not specific to this codebase) — so calling
+        # .bitwiseAnd() on that band afterward crashes with exactly
+        # "Image.bitwiseAnd: Bitwise operands must be integer only."
+        # Reproduced and confirmed via a live GEE call before this fix.
+        # This is also not just a crash: masking a composite AFTER the
+        # fact is semantically wrong regardless — the whole point of
+        # cloud masking is to exclude cloud-contaminated pixels from
+        # ever contributing to the median in the first place. Masking
+        # each raw image (still genuinely integer-typed) before
+        # compositing is both the fix and the only version of this that
+        # was ever going to be correct.
+        cloud_masking_applied: list[PreprocessingStep] = []
+        if PreprocessingStep.CLOUD_MASKING in requested_preprocessing:
+            if source == RemoteSensingSource.SENTINEL_2:
+                collection = collection.map(_mask_sentinel2_clouds)
+                cloud_masking_applied.append(PreprocessingStep.CLOUD_MASKING)
+            elif source == RemoteSensingSource.LANDSAT:
+                collection = collection.map(_mask_landsat_clouds)
+                cloud_masking_applied.append(PreprocessingStep.CLOUD_MASKING)
+            # else: no usable cloud/QA band for this source in this
+            # pipeline — honestly not applied, not silently faked.
+
         image = collection.median()
-        return _apply_preprocessing(
+        remaining_steps = tuple(
+            step for step in requested_preprocessing if step != PreprocessingStep.CLOUD_MASKING
+        )
+        image, applied = _apply_preprocessing(
             image,
             source=source,
             region=region,
             declared_crs=declared_crs,
-            requested_steps=requested_preprocessing,
+            requested_steps=remaining_steps,
         )
+        return image, cloud_masking_applied + applied

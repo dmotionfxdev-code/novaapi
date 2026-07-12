@@ -200,6 +200,27 @@ failure still fails the job — the fix's error handling is not overly broad) an
 integration tests (`tests/integration/test_gee_connectivity.py`). Full detail:
 `RELEASE_CANDIDATE_CHECKLIST.md` §6.
 
+### 15b. Update — a third, genuine issue found and fixed: `Image.bitwiseAnd` crash on CLOUD_MASKING
+
+A subsequent request with `CLOUD_MASKING` in `requested_preprocessing` failed with
+`Image.bitwiseAnd: Bitwise operands must be integer only`. Traced to source, not guessed: the
+frontend (`RemoteSensingPage.php`, `DataAcquisitionRepository.php`) was confirmed to send correctly
+named preprocessing steps and QA bands — this was purely a backend bug. Root cause:
+`_build_composite()` in `gee_connector.py` composited the Earth Engine `ImageCollection` via
+`.median()` **before** `_apply_preprocessing()` ran the QA-band `bitwiseAnd()` calls that implement
+cloud masking. Earth Engine's `.median()` reducer always returns FLOAT-typed bands for every band —
+including the QA60 (Sentinel-2)/QA_PIXEL (Landsat) bitmask bands — regardless of the source bands'
+integer type, so the bitwise op crashed against the now-float QA band. Classified as a **Bug**
+(existing, shipped capability not actually working for a documented, supported preprocessing
+option) and fixed by moving cloud masking to run per-image, via `ee.ImageCollection.map(...)`,
+before `.median()` compositing — which is also the only semantically correct place for it: masking
+a composite after the fact defeats the purpose of cloud masking (excluding cloud-contaminated
+pixels from ever contributing to the median). Verified with new unit tests proving the correct
+`.map()`-before-`.median()` call order (Sentinel-2, Landsat), that masking is honestly skipped (not
+silently faked) when not requested or when unsupported for a source (MODIS), plus an extended
+real-network integration test requesting `CLOUD_MASKING` against the live Earth Engine API. Full
+detail: `RELEASE_CANDIDATE_CHECKLIST.md` §6.
+
 ---
 
 ## Operational Note: one transient network error, not a deployment defect
