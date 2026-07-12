@@ -49,11 +49,27 @@ Design decisions, named rather than hidden (Sprint 14 requirements #2/#3/
   need a bounded region, and letting a GEE job request an unbounded
   global export would be a real, unbounded-cost operation this platform
   has no business allowing silently.
+
+Capability note (bug fix, post-RC1 Production Acceptance Test): **this
+platform stores statistical outputs (per-band ``reduceRegion`` means and
+the spectral indices derived from them), not full raster imagery, as the
+authoritative product of a GEE acquisition.** The raw pixel GeoTIFF
+download (``getDownloadURL``) is a best-effort, optional artifact —
+nothing in Analysis, Prediction, Validation, or the frontend has ever
+consumed it (there is no raster/tile pipeline anywhere in this platform;
+see ``RasterMetadataResponse.available``, always ``False``). Earth
+Engine's synchronous ``getDownloadURL`` has a fixed request-size limit
+that any AOI larger than a small test square exceeds at native
+resolution — when that happens, the acquisition still completes
+successfully using the already-computed statistics; ``AcquisitionJob``'s
+raw content is honestly absent (never fabricated), and its provenance
+records why (``FetchResult.raster_skipped_reason``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 
 import ee
@@ -64,6 +80,23 @@ from georisk.contexts.data_acquisition.domain.value_objects import (
     PreprocessingStep,
     RemoteSensingSource,
 )
+
+logger = logging.getLogger("georisk.data_acquisition.gee")
+
+#: The exact two substrings Earth Engine's own error text contains when
+#: `Image.getDownloadURL()` rejects a request for exceeding its
+#: synchronous request-size limit — observed verbatim against the real
+#: Earth Engine API during the RC1 Production Acceptance Test:
+#: "Total request size (1160529786 bytes) must be less than or equal to
+#: 50331648 bytes." Matching on both (not just one) keeps this specific,
+#: per requirement #3 — an unrelated EEException carrying only one of
+#: these substrings by coincidence is not treated as a skippable case.
+_REQUEST_SIZE_LIMIT_MARKERS = ("Total request size", "must be less than or equal to")
+
+
+def _is_request_size_limit_error(exc: Exception) -> bool:
+    message = str(exc)
+    return all(marker in message for marker in _REQUEST_SIZE_LIMIT_MARKERS)
 
 #: Real Earth Engine collection asset IDs, one per supported source.
 _COLLECTION_BY_SOURCE: dict[RemoteSensingSource, str] = {
@@ -268,19 +301,56 @@ class GoogleEarthEngineProvider:
                 maxPixels=1_000_000_000, bestEffort=True,
             ).getInfo()
 
-        download_url = image.getDownloadURL(
-            {"region": region, "scale": scale, "format": "GEO_TIFF"}
-        )
-        response = requests.get(download_url, timeout=120)
-        response.raise_for_status()
+        # Bug fix (post-RC1 Production Acceptance Test): band_statistics
+        # above is already the real, authoritative output of a GEE fetch
+        # (it's all Feature Extraction ever reads — extract_features() in
+        # application/handlers.py takes band_statistics, never this raw
+        # download's bytes) — proven by the fact that as of this fix,
+        # nothing downstream in Analysis/Prediction/Validation/the
+        # frontend has ever consumed a GEE job's raw raster content
+        # (there is no raster pipeline anywhere in this platform; see
+        # RasterMetadataResponse.available, always False). The raw pixel
+        # download below is therefore best-effort only: Earth Engine's
+        # synchronous getDownloadURL has a fixed, real request-size limit
+        # (observed: 50331648 bytes) that any AOI larger than a small test
+        # square exceeds at native resolution — that must not fail an
+        # acquisition whose real, useful output was already computed
+        # successfully above. Only this specific, identified Earth Engine
+        # error is caught; anything else (including a failure in the
+        # reduceRegion calls above, which run BEFORE this block and are
+        # entirely unaffected by it) still propagates and fails the job,
+        # via fetch()'s existing outer exception handler.
+        raster_content: bytes | None = None
+        raster_skipped_reason: str | None = None
+        try:
+            download_url = image.getDownloadURL(
+                {"region": region, "scale": scale, "format": "GEO_TIFF"}
+            )
+            response = requests.get(download_url, timeout=120)
+            response.raise_for_status()
+            raster_content = response.content
+        except (ee.EEException, requests.HTTPError) as exc:
+            if not _is_request_size_limit_error(exc):
+                raise
+            raster_skipped_reason = (
+                "Raster download skipped: exceeded Earth Engine's synchronous "
+                f"request-size limit ({exc})"
+            )
+            logger.warning(
+                "GEE raster download skipped for %s (request-size limit); "
+                "continuing with band statistics only: %s",
+                source.value,
+                exc,
+            )
 
         return FetchResult(
             success=True,
-            content=response.content,
+            content=raster_content,
             error=None,
             applied_preprocessing=tuple(applied),
             band_statistics=band_statistics,
             comparison_band_statistics=comparison_band_statistics,
+            raster_skipped_reason=raster_skipped_reason,
         )
 
     def _build_composite(

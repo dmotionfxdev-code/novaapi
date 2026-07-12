@@ -50,7 +50,9 @@ def gee_provider() -> GoogleEarthEngineProvider:
 async def test_real_gee_fetch_returns_band_statistics_over_a_small_aoi(
     gee_provider: GoogleEarthEngineProvider,
 ) -> None:
-    # A small, fixed AOI (~1km^2 near the equator) so a real fetch stays cheap.
+    # A small, fixed AOI (~1km^2 near the equator) so a real fetch stays cheap
+    # and comfortably under Earth Engine's raster-download size limit —
+    # the raster download is expected to SUCCEED for an AOI this small.
     spec = RemoteSensingFetchSpec(
         remote_sensing_source=RemoteSensingSource.SENTINEL_2,
         declared_crs="EPSG:4326",
@@ -71,3 +73,45 @@ async def test_real_gee_fetch_returns_band_statistics_over_a_small_aoi(
     assert result.content is not None
     assert result.band_statistics is not None
     assert "B4" in result.band_statistics
+    # Bug fix (post-RC1 Production Acceptance Test): a genuinely successful
+    # raster download must never carry a "skipped" reason.
+    assert result.raster_skipped_reason is None
+
+
+async def test_real_gee_fetch_succeeds_via_statistics_when_raster_exceeds_size_limit(
+    gee_provider: GoogleEarthEngineProvider,
+) -> None:
+    """Bug fix (post-RC1 Production Acceptance Test): reproduces, against
+    the real Earth Engine API, the exact failure the live acceptance test
+    hit — a realistically-sized AOI (~20km x 20km, the same area used
+    during that test) requests far more raw pixel data than Earth
+    Engine's synchronous getDownloadURL allows in one request. Before this
+    fix, this made the entire acquisition FAIL even though the real,
+    useful output (band statistics) was already computed successfully.
+    After this fix, the acquisition succeeds: content is honestly absent
+    (never a fabricated placeholder) and raster_skipped_reason documents
+    why, while band_statistics — the actual point of a GEE fetch, per this
+    platform's own established "no raster pipeline consumes this" finding
+    — is genuinely present.
+    """
+    spec = RemoteSensingFetchSpec(
+        remote_sensing_source=RemoteSensingSource.SENTINEL_2,
+        declared_crs="EPSG:4326",
+        temporal_start=None,
+        temporal_end=None,
+        comparison_temporal_start=None,
+        comparison_temporal_end=None,
+        aoi_geometry={
+            "type": "Polygon",
+            "coordinates": [
+                [[38.5, -6.5], [38.5, -6.3], [38.7, -6.3], [38.7, -6.5], [38.5, -6.5]]
+            ],
+        },
+    )
+    result = await gee_provider.fetch(source_reference="ignored", spec=spec)
+    assert result.success is True, result.error
+    assert result.content is None
+    assert result.band_statistics is not None
+    assert "B4" in result.band_statistics
+    assert result.raster_skipped_reason is not None
+    assert "request-size limit" in result.raster_skipped_reason

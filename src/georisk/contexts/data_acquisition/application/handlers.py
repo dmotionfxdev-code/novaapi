@@ -533,14 +533,29 @@ class ExecuteAcquisitionJobHandler:
             # entirely.
             fetch_result = FetchResult(success=False, content=None, error=str(exc))
 
-        if not fetch_result.success or fetch_result.content is None:
+        if not fetch_result.success:
             return await self._fail(job, tenant_id, fetch_result.error or "Fetch failed")
 
-        outcome = validate_dataset_content(
-            format=job.format, content=fetch_result.content, crs=job.declared_crs
-        )
-        if not outcome.is_valid:
-            return await self._fail(job, tenant_id, "; ".join(outcome.errors))
+        if fetch_result.content is None:
+            # Bug fix (post-RC1 Production Acceptance Test): `content`
+            # being absent is ordinarily itself a failure (every other
+            # provider's real dataset content IS its `content`) — but
+            # `raster_skipped_reason` set is GoogleEarthEngineProvider's
+            # explicit, honest signal that this specific fetch succeeded
+            # (band_statistics already computed) and deliberately chose
+            # not to return raw raster bytes nothing downstream consumes
+            # anyway. Any other content=None case is still a real failure,
+            # exactly as before.
+            if fetch_result.raster_skipped_reason is None:
+                return await self._fail(
+                    job, tenant_id, fetch_result.error or "Fetch returned no content"
+                )
+        else:
+            outcome = validate_dataset_content(
+                format=job.format, content=fetch_result.content, crs=job.declared_crs
+            )
+            if not outcome.is_valid:
+                return await self._fail(job, tenant_id, "; ".join(outcome.errors))
 
         # Sprint B: ``validate_dataset_content`` above only confirmed the
         # ZIP is a *structurally complete* Shapefile dataset (has exactly
@@ -554,6 +569,14 @@ class ExecuteAcquisitionJobHandler:
         # generic exception, per requirement #6.
         shapefile_result: ShapefileImportResult | None = None
         if job.format is AcquisitionFormat.SHAPEFILE:
+            # A SHAPEFILE-format job only ever comes from Local Upload,
+            # never GOOGLE_EARTH_ENGINE — content is None only for the
+            # GEE raster-skip case (raster_skipped_reason set), which
+            # this branch is unreachable for. Asserted, not just assumed,
+            # so this stays a loud failure rather than a silent one if
+            # that invariant is ever violated (same pattern as
+            # gee_connector.py's `assert source is not None`).
+            assert fetch_result.content is not None
             try:
                 shapefile_result = parse_shapefile_archive(fetch_result.content)
             except (
@@ -649,6 +672,7 @@ class ExecuteAcquisitionJobHandler:
             shapefile_importer_version=(
                 SHAPEFILE_IMPORTER_VERSION if shapefile_result is not None else None
             ),
+            raster_download_warning=fetch_result.raster_skipped_reason,
         )
         await self._job_repo.save(job)
         await append_event(

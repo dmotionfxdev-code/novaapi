@@ -180,6 +180,26 @@ error: "Unable to load PEM file. See https://cryptography.io/en/latest/faq/#why-
 
 This is **not a code bug** — the honest-failure guard exists and is correctly written; it just isn't the guard that fired here, because these fields aren't actually empty. **Action needed, if Remote Sensing is required**: re-enter `GEE_SERVICE_ACCOUNT_PRIVATE_KEY` in Render's dashboard making sure literal newlines in the key are preserved as `\n` two-character escape sequences in the JSON *value itself* (not doubly-escaped, and not raw newlines pasted into a single-line dashboard field), or clear both fields entirely to fall back to the clean "not configured" behavior demonstrated everywhere else in this platform. If Remote Sensing isn't needed yet, no action is required — every other capability tested above works correctly regardless.
 
+### 15a. Update — credential fixed, then a real bug found and fixed
+
+After this report's original run, the private key was corrected (real newlines, re-verified via a
+byte-accurate extraction rather than manual retyping) and re-tested live. Authentication then
+succeeded, surfacing a **second, genuine issue**: any AOI larger than a small test square made the
+raw raster download exceed Earth Engine's fixed 48MB synchronous request-size limit, failing the
+**entire acquisition** — even though the real, useful output (`band_statistics`, computed via
+`reduceRegion` moments earlier) had already succeeded. Traced precisely: the raw pixel bytes are
+never consumed by anything downstream in this platform (no raster pipeline exists in Analysis,
+Prediction, Validation, or the frontend — confirmed by direct inspection of every consumer of
+`FetchResult.content`). Classified as a **Bug** (existing, shipped capability not actually working
+for realistic inputs) and fixed: the raster download is now a best-effort, optional artifact — an
+Earth-Engine-size-limit failure is caught specifically (not swallowed broadly) and the acquisition
+completes successfully using the already-computed statistics, with the omission honestly recorded
+in the job's provenance rather than fabricating placeholder content. Verified with 4 new unit tests
+(`tests/unit/test_gee_connector.py`, including a test proving a genuine pre-download Earth Engine
+failure still fails the job — the fix's error handling is not overly broad) and 2 new real-network
+integration tests (`tests/integration/test_gee_connectivity.py`). Full detail:
+`RELEASE_CANDIDATE_CHECKLIST.md` §6.
+
 ---
 
 ## Operational Note: one transient network error, not a deployment defect

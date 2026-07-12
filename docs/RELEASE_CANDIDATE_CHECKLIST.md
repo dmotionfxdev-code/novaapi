@@ -49,7 +49,7 @@ something is unverified or open, it says so explicitly rather than assuming it's
 | `JWT_SECRET_KEY` | Yes (`generateValue: true`) | Render-generated, never in source |
 | `CORS_ALLOWED_ORIGINS` | **Placeholder** | `render.yaml` ships `https://REPLACE-WITH-YOUR-FRONTEND-DOMAIN.example` — **action needed**: set to the real frontend origin once one exists. Currently low-urgency since the frontend calls the backend server-side (Laravel-to-FastAPI), never via browser `fetch`, so browser CORS isn't actually exercised yet — but must be correct before any future direct-browser API usage |
 | `REDIS_URL` / `REDIS_RATELIMIT_URL` | Yes (via `fromService`, `georisk-cache`) | Confirmed working |
-| `GEE_SERVICE_ACCOUNT_EMAIL` / `_PRIVATE_KEY` / `GEE_PROJECT_ID` | Present but malformed | See §6 |
+| `GEE_SERVICE_ACCOUNT_EMAIL` / `_PRIVATE_KEY` / `GEE_PROJECT_ID` | Working | See §6 |
 | `SMTP_*`, `USGS_*`, `NASA_*`, `COPERNICUS_*` | Unset | Honestly fail when unset — by design, not a gap |
 | `RATE_LIMIT_*` (7 fields) | Unset (code defaults apply) | Defaults: login 10/min, registration 5/hr, password-reset 5/hr, token-refresh 30/min, analysis/prediction execution 20/min, upload 20/min |
 
@@ -69,8 +69,8 @@ something is unverified or open, it says so explicitly rather than assuming it's
 
 ## 6. Google Earth Engine (GEE)
 
-- **Status: configured but broken.** `GEE_SERVICE_ACCOUNT_EMAIL`/`GEE_SERVICE_ACCOUNT_PRIVATE_KEY` hold non-empty values on Render (the honest "not configured" guard in `gee_connector.py:213` did not fire), but the private key fails PEM parsing (`InvalidData(InvalidByte(0, 92))`) — traced to a formatting issue, most likely literal `\n` two-character sequences pasted instead of real line breaks.
-- **Action needed**: re-enter the private key in Render's dashboard with real newlines preserved (see this session's earlier worked example), or clear both fields to fall back to the platform's clean "not configured" behavior.
+- **Status: working.** Authentication is live and verified (the PEM-formatting issue and a subsequent JWT-signature mismatch — both traced to credential entry, not code — are resolved; confirmed via a real live acquisition job reaching Earth Engine's API).
+- **Capability boundary, by design, not a gap**: this platform stores **statistical outputs** (per-band `reduceRegion` means and the spectral indices derived from them) as the authoritative product of a GEE acquisition — never full raster imagery. The raw pixel GeoTIFF download is a **best-effort, optional artifact**; nothing in Analysis, Prediction, Validation, or the frontend has ever consumed it (no raster/tile pipeline exists anywhere in this platform). Earth Engine's synchronous download has a fixed request-size limit that any AOI larger than a small test square exceeds at native resolution — a real defect this was until fixed (see below): it used to fail the *entire* acquisition even though the real, useful statistical output had already been computed. Fixed: the acquisition now completes successfully in that case, with the raster content honestly absent and the reason recorded in the job's provenance (`FetchResult.raster_skipped_reason`). Verified with new unit tests (`tests/unit/test_gee_connector.py`) proving all three cases — raster succeeds, raster exceeds the limit (statistics still returned), and a genuine pre-download Earth Engine failure still fails the job — plus two real-network integration tests in `tests/integration/test_gee_connectivity.py`.
 - **Not a deployment blocker** — every other Data Acquisition path (Local Upload, and USGS/NASA/Copernicus whenever configured) is unaffected and already proven working.
 
 ## 7. Backups
@@ -108,7 +108,6 @@ something is unverified or open, it says so explicitly rather than assuming it's
 - No CRS reprojection on Shapefile ingest (must already be an accepted CRS).
 - No object storage (uploads travel as base64 in Postgres rows — a real, if currently harmless, scaling ceiling).
 - SMS notification channel remains an honest, permanent stub.
-- GEE credential currently malformed (§6) — not itself a security issue, but worth fixing alongside any other GEE work.
 
 ## 12. Documentation
 
@@ -126,7 +125,7 @@ Current, real documentation in `georisk-platform/docs/`: `PRODUCTION_READINESS_R
 
 1. Render free-tier Postgres auto-deletes after 30 days (§4) — **highest priority**.
 2. No verified backup/restore against the live database (§7) — **highest priority**.
-3. GEE private key malformed on Render (§6) — fix before using Remote Sensing.
+3. GEE now authenticates correctly and raster download is honestly optional (§6, fixed) — no action needed unless a future feature genuinely needs raw imagery, which would be new scope.
 4. `CORS_ALLOWED_ORIGINS` still a placeholder (§3) — low urgency today, must fix before any browser-direct API usage.
 5. No Activity Log HTTP endpoint anywhere in the backend — `contexts/audit/` is empty scaffolding (confirmed by direct inspection during the acceptance test); the frontend's own Activity Log page (Wave 10) already compensates for this honestly by assembling a feed from other real endpoints rather than a dedicated audit API.
 6. No object storage — uploads are base64-in-Postgres.
@@ -157,4 +156,4 @@ None of these are regressions introduced by RC1 work — all are either pre-exis
 
 ## Summary for RC1 Sign-Off
 
-**Technically ready, operationally not yet hardened for real production traffic.** Every functional capability this checklist covers has been verified live, end-to-end, against the real deployed backend and frontend. The open items are entirely in the *operational* category — data durability (30-day Postgres expiry + no backup path), one misconfigured optional integration (GEE), monitoring/alerting, and a business-side UAT sign-off — not in application correctness. Recommend closing items 1-2 in §14 before treating this as more than an extended acceptance-testing deployment.
+**Technically ready, operationally not yet hardened for real production traffic.** Every functional capability this checklist covers has been verified live, end-to-end, against the real deployed backend and frontend. GEE is now fully working, including a real bug fix (raster download made an honest, best-effort optional artifact rather than able to fail an entire acquisition) found and closed during this cycle. The open items are entirely in the *operational* category — data durability (30-day Postgres expiry + no backup path), monitoring/alerting, and a business-side UAT sign-off — not in application correctness. Recommend closing items 1-2 in §14 before treating this as more than an extended acceptance-testing deployment.

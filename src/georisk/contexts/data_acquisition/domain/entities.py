@@ -510,6 +510,7 @@ class AcquisitionJob:
         shapefile_crs: str | None = None,
         shapefile_attributes: dict[str, object] | None = None,
         shapefile_importer_version: str | None = None,
+        raster_download_warning: str | None = None,
     ) -> AcquisitionJobCompleted:
         if self.status != AcquisitionJobStatus.RUNNING:
             raise IllegalAcquisitionJobTransitionError(
@@ -529,6 +530,13 @@ class AcquisitionJob:
         description = "Fetched, validated, and catalogued successfully"
         if extracted_features:
             description += f"; extracted features: {sorted(extracted_features)}"
+        if raster_download_warning is not None:
+            # Bug fix (post-RC1 Production Acceptance Test) — requirement
+            # #4: a durable, queryable provenance record of the raster
+            # download being intentionally skipped, same mechanism as
+            # every other provenance note on this entity (never a
+            # separate ad hoc log-only warning).
+            description += f"; WARNING: {raster_download_warning}"
         if shapefile_geometry_type is not None:
             # Sprint B requirement #5 — Provenance: original filename
             # (``source_reference``), CRS, geometry type, feature count,

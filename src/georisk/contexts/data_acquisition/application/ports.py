@@ -64,6 +64,16 @@ class FetchResult:
     applied_preprocessing: tuple[PreprocessingStep, ...] = field(default_factory=tuple)
     band_statistics: dict[str, float] | None = None
     comparison_band_statistics: dict[str, float] | None = None
+    # Bug fix (post-RC1 Production Acceptance Test): set only by
+    # GoogleEarthEngineProvider when a genuinely successful fetch
+    # (band_statistics already computed via reduceRegion) intentionally
+    # skipped the raw raster download because it exceeded Earth Engine's
+    # synchronous request-size limit. `content` stays None in that case —
+    # never a fabricated placeholder — and this field carries the honest
+    # reason, surfaced in the AcquisitionJob's provenance and server logs.
+    # None for every other provider/outcome, including a GEE fetch that
+    # genuinely failed for any other reason.
+    raster_skipped_reason: str | None = None
 
 
 class AcquisitionProvider(Protocol):
